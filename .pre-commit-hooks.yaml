@@ -1,0 +1,6 @@
+- id: basset
+  name: Scan staged blobs for credentials
+  language: rust
+  entry: basset staged .
+  pass_filenames: false
+  always_run: true

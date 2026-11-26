@@ -7,21 +7,26 @@ Basset Hunt is an open-source Rust CLI that detects exposed credentials in files
 Use stable Rust with Cargo (edition 2024), and Git 2.36 or newer for Git modes. The first build downloads crates. Scanning runs locally.
 
 ```bash
-cargo build --release
-cargo install --path .
+cargo build --release --locked
+cargo install --path . --locked
 basset rules
 basset rules --list
 basset fs ./service
 basset git ./service
+basset git-range ./service --base origin/main --head HEAD
 basset staged ./service
 printf '%s\n' 'ordinary configuration' | basset stdin --name deployment.env
 ```
 
 Git history mode requires a full local clone. It scans regular-file versions reachable from all local refs, including fetched branches, tags and detached HEAD. It reads raw blobs and scans each distinct (path, blob) once, including files later deleted. The revision is one commit containing that version, not necessarily the original introduction. Staged mode reads the changed index blobs even when the working copy differs. Submodules need their own scan. Git LFS pointer files contain only pointers; scan the materialized LFS assets separately.
 
+`basset git-range` requires locally available base and head commits in a non-shallow repository. It fails incomplete on shallow history rather than treating a truncated history boundary as a root commit. It scans added lines in non-merge commits reachable from head but not base, using full blob context to detect multiline secrets. Merge commits themselves are omitted, matching TruffleHog v3.100.1; a secret introduced only while resolving a merge conflict is not covered by this mode. Use `basset git` for a separate full-history audit. Range output defaults to JSONL; `--format sarif` emits SARIF 2.1.0 with generic messages and location-only fingerprints, never matched values or inventory fingerprints. Result URIs are repository-relative; `%SRCROOT%` records the checkout's `file://` base URI, so protect SARIF artifacts if the local checkout path is sensitive. Partial SARIF retains available findings and marks the invocation unsuccessful.
+
 ## Detection and triage
 
 The pinned `secrets_scanner` 0.2.3 library supplies the embedded rule catalog, keyword matching, entropy checks and allowlists. Its default catalog documents 988 active rules. Multiple rules can detect variants of the same credential type. `basset rules` measures the locally compiled catalog, and scans fail if fewer than 800 rules load. See the [upstream catalog and licensing notes](https://docs.rs/crate/secrets_scanner/0.2.3/source/README.md).
+
+Inline comments such as `gitleaks:allow` and `secrets-scanner:allow` never suppress Basset findings in any scan mode. Treat scanned content as untrusted; use the trusted inventory and the normal results filters for triage.
 
 Stdout carries one JSON object per finding. Stderr carries coverage diagnostics. Match text and source lines are excluded. Paths, source names, owner labels and runbook references are included verbatim as JSON strings and should be suitable for the intended report audience. Put tokens and signed URLs in content, never in location or inventory metadata.
 
@@ -115,7 +120,7 @@ Each record uses `source`, `path`, optional `revision` and string `content`. Mal
 
 ## CI and containers
 
-The included GitHub Actions workflow builds the scanner, runs the integration suite and scans the full checkout. Jenkins uses a preinstalled `basset` and a full clone. To enforce a gate across application repositories, install a separately reviewed scanner build in the runner. Keep the HMAC key and trusted inventory out of untrusted pull-request jobs. Default candidate detection works without either.
+The included GitHub Actions workflow builds the scanner and runs integration tests on pushes and pull requests. Pushes retain the full-history scan; pull requests pass the event base/head SHAs to `git-range` and preserve SARIF as an artifact even when findings or incomplete analysis make the scan step fail. A separate job attempts code-scanning upload only for same-repository pull requests and holds `security-events: write`; forks receive no secrets or write permissions and keep the artifact fallback. Jenkins uses a preinstalled `basset` and a full clone. To enforce a gate across application repositories, install a separately reviewed scanner build in the runner. Keep the HMAC key and trusted inventory out of untrusted pull-request jobs. Default candidate detection works without either.
 
 For a local pre-commit configuration after `cargo install --path .`:
 
@@ -144,13 +149,13 @@ The same build and run commands work with Podman. For rootless Podman use `--use
 ## Development and license
 
 ```bash
-cargo build --release
+cargo build --release --locked
 cargo test --locked
 python3 tests/test_iam.py
 python3 tests/e2e.py target/release/basset
 ```
 
-The Python integration suite generates synthetic values and exercises the compiled CLI. The first Cargo build resolves transitive dependencies and writes Cargo.lock. Retain that lockfile for releases and build subsequent releases with `--locked`.
+The Python integration suite generates synthetic values and exercises the compiled CLI. `Cargo.lock` is versioned; use `--locked` for reproducible builds, installs and tests. Update the lockfile intentionally when dependencies change.
 
 Original project code is MIT-licensed. The detector library and its bundled rule sources retain their upstream licenses and notices. The optional extended rule pack and HTTP updater are disabled.
 
