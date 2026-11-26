@@ -22,10 +22,10 @@ def category(case):
 
 
 def measure(argv, cwd, out_file):
-    """Run argv, capturing stdout to out_file; return (exit code, seconds, peak RSS in KB)."""
+    """Run argv, capturing stdout and stderr; return (exit code, seconds, peak RSS in KB)."""
     start = time.monotonic()
-    with open(out_file, "wb") as out:
-        proc = subprocess.Popen(argv, cwd=cwd, stdout=out, stderr=subprocess.DEVNULL)
+    with open(out_file, "wb") as out, open(f"{out_file}.err", "wb") as err:
+        proc = subprocess.Popen(argv, cwd=cwd, stdout=out, stderr=err)
         _, status, usage = os.wait4(proc.pid, 0)
     return os.waitstatus_to_exitcode(status), time.monotonic() - start, usage.ru_maxrss
 
@@ -82,6 +82,12 @@ def check_version(tool, binary):
     if tool in PINNED and version != PINNED[tool]:
         sys.exit(f"{tool} {PINNED[tool]} required, found {version or 'nothing'}")
     return version
+
+
+def leaked(values, texts):
+    """Count secret values (or private key body lines) that appear in any output text."""
+    needles = [part for v in values for part in v.splitlines() if "PRIVATE KEY" not in part]
+    return sum(any(n in t for t in texts) for n in needles)
 
 
 def score(cases, hits):
@@ -143,10 +149,11 @@ def main():
     tree = args.out / "tree"
     for name in ("files", "encoded", "archives"):
         shutil.copytree(corpus / name, tree / name)
-    cases = json.loads((corpus / "labels.json").read_text())["cases"]
+    labels = json.loads((corpus / "labels.json").read_text())
+    cases = labels["cases"]
     report = {"version": 1, "seed": args.seed, "tools": {}}
     for tool, binary in binaries.items():
-        hits, seconds, rss = [], 0.0, 0
+        hits, seconds, rss, texts = [], 0.0, 0, []
         for mode, cwd in (("fs", tree), ("git", corpus / "repo")):
             raw_file = args.out / f"{tool}-{mode}.out"
             target = "." if mode == "fs" else str(cwd.resolve())
@@ -156,8 +163,10 @@ def main():
                 sys.exit(f"{tool} {mode} exited {code}")
             raw = Path(report_file).read_text() if report_file else raw_file.read_text()
             hits += [(mode, h) for h in parse(tool, mode, raw)]
+            texts += [raw, Path(f"{raw_file}.err").read_text(errors="replace")]
             seconds, rss = seconds + spent, max(rss, peak)
-        report["tools"][tool] = score(cases, hits) | {"version": versions[tool], "time_s": round(seconds, 3), "max_rss_kb": rss}
+        report["tools"][tool] = score(cases, hits) | {"version": versions[tool], "time_s": round(seconds, 3), "max_rss_kb": rss,
+                                                    "leaked_values": leaked(labels["secret_values"], texts)}
     (args.out / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     (args.out / "report.md").write_text(markdown(report))
     print(markdown(report))

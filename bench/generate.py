@@ -53,6 +53,7 @@ POSITIVES = [
 ]
 
 GENERATORS = {provider: (family, make) for provider, family, make in POSITIVES}
+ISSUED = []  # every secret value written, for the leak check
 
 # (kind, generator) -- realistic values that are not secrets
 NEGATIVES = [
@@ -97,7 +98,9 @@ GIT_ENV = {
 
 
 def make(provider, rng):
-    return GENERATORS[provider][1](rng)
+    value = GENERATORS[provider][1](rng)
+    ISSUED.append(value)
+    return value
 
 
 def secret_case(case_id, provider, **fields):
@@ -182,15 +185,16 @@ def generate(out, seed, per_family):
     rng = random.Random(seed)
     (out / "files").mkdir(parents=True)
     cases = []
-    for provider, family, make in POSITIVES:
+    ISSUED.clear()
+    for provider, family, _ in POSITIVES:
         for n in range(per_family):
-            case = write_case(out, rng, f"pos-{provider}-{n}", f"{provider.upper()}_SECRET", make(rng), family == "private-key")
+            case = write_case(out, rng, f"pos-{provider}-{n}", f"{provider.upper()}_SECRET", make(provider, rng), family == "private-key")
             cases.append(case | {"secret": True, "family": family, "provider": provider, "source": "files", "encoding": "plain"})
-    for n, (kind, make) in enumerate(NEGATIVES):
-        case = write_case(out, rng, f"neg-{kind}-{n}", "REFERENCE", make(rng), False)
+    for n, (kind, negative) in enumerate(NEGATIVES):
+        case = write_case(out, rng, f"neg-{kind}-{n}", "REFERENCE", negative(rng), False)
         cases.append(case | {"secret": False, "family": "negative", "kind": kind, "source": "files", "encoding": "plain"})
     cases += encoded(out, rng) + archives(out, rng) + repo(out, rng)
-    labels = {"version": 1, "seed": seed, "cases": cases}
+    labels = {"version": 1, "seed": seed, "cases": cases, "secret_values": ISSUED}
     (out / "labels.json").write_text(json.dumps(labels, indent=2, sort_keys=True) + "\n")
 
 
