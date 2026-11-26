@@ -2,6 +2,7 @@
 name = "basset-hunt"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 description = "Offline credential exposure scanner for local assets and Git history"
 publish = false
