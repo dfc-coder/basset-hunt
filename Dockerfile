@@ -1,8 +1,8 @@
-FROM rust:1-trixie AS build
+FROM rust:1.100.0-trixie AS build
 WORKDIR /build
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release
+RUN cargo build --release --locked
 
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
