@@ -3,6 +3,7 @@ mod git;
 mod inputs;
 
 use std::io::{self, BufWriter, Write};
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -43,6 +44,8 @@ enum Source {
     Records,
     /// Scan file versions reachable from local Git refs and HEAD.
     Git { repo: PathBuf },
+    /// Scan added lines between two commits in a local repository.
+    GitRange { repo: PathBuf, #[arg(long)] base: String, #[arg(long)] head: String },
     /// Scan changed files from the Git index.
     Staged { repo: PathBuf },
     /// Print the number of compiled detectors.
@@ -74,17 +77,43 @@ pub struct Audit<W> {
     incomplete: u64,
 }
 
+fn overlaps_added_lines(
+    bytes: &[u8],
+    secret_start_offset: usize,
+    secret: &[u8],
+    added: &[RangeInclusive<usize>],
+) -> bool {
+    let first_line = 1 + bytes[..secret_start_offset].iter().filter(|&&byte| byte == b'\n').count();
+    let covered_lines = secret.iter().filter(|&&byte| byte == b'\n').count();
+    let trailing_newline = usize::from(secret.last() == Some(&b'\n'));
+    let last_line = first_line + covered_lines.saturating_sub(trailing_newline);
+    added.iter().any(|range| *range.start() <= last_line && *range.end() >= first_line)
+}
+
 impl<W: Write> Audit<W> {
     fn document(&mut self, loc: Location<'_>, bytes: &[u8]) -> Result<()> {
+        self.document_selected(loc, bytes, None)
+    }
+
+    fn document_added_lines(&mut self, loc: Location<'_>, bytes: &[u8], added: &[RangeInclusive<usize>]) -> Result<()> {
+        self.document_selected(loc, bytes, Some(added))
+    }
+
+    fn document_selected(&mut self, loc: Location<'_>, bytes: &[u8], added: Option<&[RangeInclusive<usize>]>) -> Result<()> {
         let scanned = self.engine.scan_bytes_detailed(loc.path, bytes);
         self.documents += 1;
         if scanned.findings_truncated {
             self.skip(&loc, "detector finding cap")?;
         }
         for hit in scanned.findings {
-            self.candidates += 1;
             let raw = bytes.get(hit.secret_start_offset..hit.secret_end_offset)
                 .context("invalid detector offsets")?;
+            if let Some(added) = added {
+                if !overlaps_added_lines(bytes, hit.secret_start_offset, raw, added) {
+                    continue;
+                }
+            }
+            self.candidates += 1;
             let digest = self.key.as_ref().filter(|_| !raw.is_empty())
                 .map(|key| evidence::fingerprint(key, raw));
             let (status, record) = self.inventory.lookup(digest.as_deref(), self.now, self.max_age);
@@ -151,6 +180,7 @@ fn run() -> Result<u8> {
             Location { source: "stdin", path: &name, revision: None, blob: None }, &mut audit),
         Source::Records => inputs::records(io::stdin().lock(), &mut audit),
         Source::Git { repo } => git::scan(&repo, false, &mut audit),
+        Source::GitRange { repo, base, head } => git::scan_range(&repo, &base, &head, &mut audit),
         Source::Staged { repo } => git::scan(&repo, true, &mut audit),
         _ => unreachable!("handled before scanning"),
     };
@@ -159,6 +189,19 @@ fn run() -> Result<u8> {
     eprintln!("{}", json!({"documents":audit.documents, "candidates":audit.candidates,
         "reported":audit.emitted,"incomplete":audit.incomplete}));
     Ok(if audit.incomplete > 0 { 2 } else if audit.emitted > 0 { 1 } else { 0 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::overlaps_added_lines;
+
+    #[test]
+    fn range_filter_uses_secret_capture_start_line() {
+        let bytes = b"match-prefix\nsecret\n";
+        let secret_start = bytes.iter().position(|&byte| byte == b's').unwrap();
+        assert!(overlaps_added_lines(bytes, secret_start, b"secret", &[2..=2]));
+        assert!(!overlaps_added_lines(bytes, secret_start, b"secret", &[1..=1]));
+    }
 }
 
 fn main() -> ExitCode {

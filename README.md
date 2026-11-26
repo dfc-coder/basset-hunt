@@ -13,11 +13,14 @@ basset rules
 basset rules --list
 basset fs ./service
 basset git ./service
+basset git-range ./service --base origin/main --head HEAD
 basset staged ./service
 printf '%s\n' 'ordinary configuration' | basset stdin --name deployment.env
 ```
 
 Git history mode requires a full local clone. It scans regular-file versions reachable from all local refs, including fetched branches, tags and detached HEAD. It reads raw blobs and scans each distinct (path, blob) once, including files later deleted. The revision is one commit containing that version, not necessarily the original introduction. Staged mode reads the changed index blobs even when the working copy differs. Submodules need their own scan. Git LFS pointer files contain only pointers; scan the materialized LFS assets separately.
+
+`basset git-range` requires locally available base and head commits in a non-shallow repository. It fails incomplete on shallow history rather than treating a truncated history boundary as a root commit. It scans added lines in non-merge commits reachable from head but not base, using full blob context to detect multiline secrets. Merge commits themselves are omitted, matching TruffleHog v3.100.1; a secret introduced only while resolving a merge conflict is not covered by this mode. Use `basset git` for a separate full-history audit.
 
 ## Detection and triage
 

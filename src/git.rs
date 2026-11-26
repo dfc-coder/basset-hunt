@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::ops::RangeInclusive;
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::str;
@@ -11,6 +12,7 @@ use crate::{Audit, Location};
 fn git(repo: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo).args(["--no-pager", "--no-replace-objects"])
+        .env("GIT_LITERAL_PATHSPECS", "1")
         .args(["-c", "core.fsmonitor=false", "-c", "log.showSignature=false"])
         .env_remove("BASSET_HMAC_KEY").env_remove("CREDCHECK_HMAC_KEY")
         .env("GIT_ALLOW_PROTOCOL", "").env("GIT_NO_LAZY_FETCH", "1")
@@ -65,6 +67,19 @@ impl Objects {
         ensure!(newline == [b'\n'], "invalid Git object framing");
         audit.document(loc, &bytes)
     }
+
+    fn scan_added<W: Write>(&mut self, oid: &str, loc: Location<'_>, added: &[RangeInclusive<usize>], audit: &mut Audit<W>) -> Result<()> {
+        let size = self.query("info", oid)?;
+        if size > audit.limit { return audit.skip(&loc, "Git blob exceeds --max-bytes"); }
+        ensure!(self.query("contents", oid)? == size, "inconsistent Git object size");
+        let mut bytes = vec![0; usize::try_from(size)?];
+        self.output.read_exact(&mut bytes)?;
+        let mut newline = [0u8];
+        self.output.read_exact(&mut newline)?;
+        ensure!(newline == [b'\n'], "invalid Git object framing");
+        if bytes.contains(&0) { return audit.skip(&loc, "binary Git blob has no line map"); }
+        audit.document_added_lines(loc, &bytes, added)
+    }
 }
 
 impl Drop for Objects {
@@ -117,6 +132,9 @@ impl<W: Write> History<'_, W> {
         })
     }
 }
+
+mod range;
+pub(crate) use range::scan as scan_range;
 
 pub fn scan<W: Write>(repo: &Path, staged: bool, audit: &mut Audit<W>) -> Result<()> {
     let label = repo.canonicalize()?.to_string_lossy().into_owned();
