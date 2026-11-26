@@ -7,8 +7,8 @@ Basset Hunt is an open-source Rust CLI that detects exposed credentials in files
 Use stable Rust with Cargo (edition 2024), and Git 2.36 or newer for Git modes. The first build downloads crates. Scanning runs locally.
 
 ```bash
-cargo build --release
-cargo install --path .
+cargo build --release --locked
+cargo install --path . --locked
 basset rules
 basset rules --list
 basset fs ./service
@@ -144,13 +144,13 @@ The same build and run commands work with Podman. For rootless Podman use `--use
 ## Development and license
 
 ```bash
-cargo build --release
+cargo build --release --locked
 cargo test --locked
 python3 tests/test_iam.py
 python3 tests/e2e.py target/release/basset
 ```
 
-The Python integration suite generates synthetic values and exercises the compiled CLI. The first Cargo build resolves transitive dependencies and writes Cargo.lock. Retain that lockfile for releases and build subsequent releases with `--locked`.
+The Python integration suite generates synthetic values and exercises the compiled CLI. `Cargo.lock` is versioned; use `--locked` for reproducible builds, installs and tests. Update the lockfile intentionally when dependencies change.
 
 Original project code is MIT-licensed. The detector library and its bundled rule sources retain their upstream licenses and notices. The optional extended rule pack and HTTP updater are disabled.
 
