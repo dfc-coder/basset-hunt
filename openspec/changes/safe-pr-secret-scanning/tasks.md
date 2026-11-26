@@ -13,8 +13,8 @@
 
 ## 3. Emit bounded, secret-safe SARIF
 
-- [ ] 3.1 Add optional SARIF 2.1.0 serialization for range findings with repository-relative URIs, line regions, generic messages, commit metadata, and location-only fingerprints; verify output parses, fingerprints are stable for unchanged locations, and no synthetic secret or its digest appears in output.
-- [ ] 3.2 Include `runs[].invocations[].executionSuccessful`, preserve findings on partial scans, and enforce a global SARIF result cap; verify the cap and every incomplete path produces valid SARIF plus exit code 2 while complete findings return code 1.
+- [x] 3.1 Add optional SARIF 2.1.0 serialization for range findings with repository-relative URIs, line regions, generic messages, commit metadata, and location-only fingerprints; verify output parses, fingerprints are stable for unchanged locations, and no synthetic secret or its digest appears in output.
+- [x] 3.2 Include `runs[].invocations[].executionSuccessful`, preserve findings on partial scans, and enforce a global SARIF result cap; verify the cap and every incomplete path produces valid SARIF plus exit code 2 while complete findings return code 1.
 
 ## 4. Wire the PR workflow and align the roadmap
 

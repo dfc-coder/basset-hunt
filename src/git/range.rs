@@ -331,6 +331,7 @@ pub(crate) fn scan<W: std::io::Write>(
 ) -> Result<()> {
     let repo = repository_root(repo)?;
     let repo_label = repo.to_string_lossy().into_owned();
+    audit.set_sarif_root(&repo_label);
     if is_shallow_repository(&repo)? {
         let loc = Location {
             source: &repo_label,

@@ -140,6 +140,35 @@ def main() -> None:
         assert range_findings and all(r["location"]["path"] == key_path.name for r in range_findings)
         assert any(r["detector"] == "private-key" and r["location"]["revision"] == key_commit
                    for r in range_findings)
+        sarif_args = [*range_args, "--format", "sarif"]
+        sarif_run = subprocess.run([BIN, *sarif_args], text=True, capture_output=True, env=ENV)
+        assert sarif_run.returncode == 1, (sarif_run.returncode, sarif_run.stderr)
+        sarif_text = sarif_run.stdout
+        assert private_key not in sarif_text
+        assert hashlib.sha256(private_key.encode()).hexdigest() not in sarif_text
+        assert all(r["fingerprint"] not in sarif_text for r in range_findings)
+        sarif_doc = json.loads(sarif_text)
+        assert sarif_doc["version"] == "2.1.0"
+        sarif_run_data = sarif_doc["runs"][0]
+        assert sarif_run_data["invocations"][0]["executionSuccessful"] is True
+        sarif_finding = sarif_run_data["results"][0]
+        assert sarif_finding["ruleId"] == "private-key"
+        assert sarif_finding["properties"]["commit"] == key_commit
+        physical = sarif_finding["locations"][0]["physicalLocation"]
+        assert physical["artifactLocation"]["uri"] == "a%5Bb%5D.pem"
+        assert physical["region"]["startLine"] >= 1
+        sarif_fingerprint = sarif_finding["partialFingerprints"]
+        second_run = subprocess.run([BIN, *sarif_args], text=True, capture_output=True, env=ENV)
+        assert second_run.returncode == 1
+        second_sarif = json.loads(second_run.stdout)
+        assert second_sarif["runs"][0]["results"][0]["partialFingerprints"] == sarif_fingerprint
+        no_key_env = {key: value for key, value in ENV.items()
+                      if key not in ("BASSET_HMAC_KEY", "CREDCHECK_HMAC_KEY")}
+        no_key_run = subprocess.run([BIN, *sarif_args], text=True, capture_output=True, env=no_key_env)
+        assert no_key_run.returncode == 1
+        no_key_doc = json.loads(no_key_run.stdout)
+        assert no_key_doc["runs"][0]["results"][0]["partialFingerprints"] == sarif_fingerprint
+
         nested_findings = scan("git-range", str(nested_dir), "--base", base, "--head", key_commit, code=1)
         assert any(r["location"]["path"] == key_path.name for r in nested_findings)
 
@@ -159,6 +188,27 @@ def main() -> None:
                    for r in removed_findings)
         scan("git-range", str(range_repo), "--base", "not-a-commit", "--head", removed, code=2)
         scan("git-range", str(range_repo), "--base", base, "--head", base, code=2)
+        invalid_sarif = subprocess.run(
+            [BIN, "git-range", str(range_repo), "--base", "not-a-commit", "--head", removed, "--format", "sarif"],
+            text=True, capture_output=True, env=ENV,
+        )
+        assert invalid_sarif.returncode == 2
+        invalid_doc = json.loads(invalid_sarif.stdout)
+        assert invalid_doc["runs"][0]["invocations"][0]["executionSuccessful"] is False
+        invalid_inventory = subprocess.run(
+            [BIN, *sarif_args, "--inventory", str(root / "missing-inventory.json")],
+            text=True, capture_output=True, env=ENV,
+        )
+        assert invalid_inventory.returncode == 2
+        inventory_doc = json.loads(invalid_inventory.stdout)
+        assert inventory_doc["runs"][0]["invocations"][0]["executionSuccessful"] is False
+        no_key_inventory = subprocess.run(
+            [BIN, *sarif_args, "--inventory", str(root / "inventory.json")],
+            text=True, capture_output=True, env=no_key_env,
+        )
+        assert no_key_inventory.returncode == 2
+        no_key_doc = json.loads(no_key_inventory.stdout)
+        assert no_key_doc["runs"][0]["invocations"][0]["executionSuccessful"] is False
 
         deletion_repo = root / "deletion-range-repo"
         deletion_repo.mkdir()
@@ -200,6 +250,40 @@ def main() -> None:
         assert private_key not in incomplete.stdout + incomplete.stderr
         partial = [json.loads(line) for line in incomplete.stdout.splitlines()]
         assert any(r["location"]["revision"] == key_commit for r in partial)
+        partial_sarif = subprocess.run(
+            [BIN, "git-range", str(range_repo), "--base", base, "--head", binary_head, "--format", "sarif"],
+            text=True, capture_output=True, env=ENV,
+        )
+        assert partial_sarif.returncode == 2
+        partial_doc = json.loads(partial_sarif.stdout)
+        assert partial_doc["runs"][0]["invocations"][0]["executionSuccessful"] is False
+        assert partial_doc["runs"][0]["results"]
+        assert private_key not in partial_sarif.stdout
+
+        cap_repo = root / "sarif-cap-repo"
+        cap_repo.mkdir()
+        git(cap_repo, "init", "-q", "-b", "main")
+        git(cap_repo, "config", "user.name", "Test")
+        git(cap_repo, "config", "user.email", "test@invalid.local")
+        git(cap_repo, "commit", "--allow-empty", "-qm", "base")
+        cap_base = git(cap_repo, "rev-parse", "HEAD")
+        cap_tokens = ["ghp_" + "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36))
+                      for _ in range(1001)]
+        (cap_repo / "tokens.txt").write_text("".join(f"GITHUB_TOKEN={token}\n" for token in cap_tokens))
+        git(cap_repo, "add", "--", "tokens.txt")
+        git(cap_repo, "commit", "-qm", "many synthetic tokens")
+        cap_head = git(cap_repo, "rev-parse", "HEAD")
+        cap_sarif = subprocess.run(
+            [BIN, "git-range", str(cap_repo), "--base", cap_base, "--head", cap_head, "--format", "sarif"],
+            text=True, capture_output=True, env=ENV,
+        )
+        assert cap_sarif.returncode == 2
+        assert all(token not in cap_sarif.stdout for token in cap_tokens)
+        assert hashlib.sha256(cap_tokens[0].encode()).hexdigest() not in cap_sarif.stdout
+        cap_doc = json.loads(cap_sarif.stdout)
+        assert len(cap_doc["runs"][0]["results"]) == 1000
+        assert cap_doc["runs"][0]["invocations"][0]["executionSuccessful"] is False
+
         scan("git-range", str(range_repo), "--base", base, "--head", binary_head, "--max-bytes", "64", code=2)
 
         shallow_repo = root / "shallow-range-repo"
@@ -211,6 +295,13 @@ def main() -> None:
         git(shallow_repo, "fetch", "-q", "--depth=1", "origin", base)
         assert git(shallow_repo, "rev-parse", "--is-shallow-repository") == "true"
         assert scan("git-range", str(shallow_repo), "--base", base, "--head", binary_head, code=2) == []
+        shallow_sarif = subprocess.run(
+            [BIN, "git-range", str(shallow_repo), "--base", base, "--head", binary_head, "--format", "sarif"],
+            text=True, capture_output=True, env=ENV,
+        )
+        assert shallow_sarif.returncode == 2
+        shallow_doc = json.loads(shallow_sarif.stdout)
+        assert shallow_doc["runs"][0]["invocations"][0]["executionSuccessful"] is False
 
         root_repo = root / "root-range-repo"
         root_repo.mkdir()
