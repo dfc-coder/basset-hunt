@@ -120,7 +120,7 @@ Each record uses `source`, `path`, optional `revision` and string `content`. Mal
 
 ## CI and containers
 
-The included GitHub Actions workflow builds the scanner, runs the integration suite and scans the full checkout. Jenkins uses a preinstalled `basset` and a full clone. To enforce a gate across application repositories, install a separately reviewed scanner build in the runner. Keep the HMAC key and trusted inventory out of untrusted pull-request jobs. Default candidate detection works without either.
+The included GitHub Actions workflow builds the scanner and runs integration tests on pushes and pull requests. Pushes retain the full-history scan; pull requests pass the event base/head SHAs to `git-range` and preserve SARIF as an artifact even when findings or incomplete analysis make the scan step fail. A separate job attempts code-scanning upload only for same-repository pull requests and holds `security-events: write`; forks receive no secrets or write permissions and keep the artifact fallback. Jenkins uses a preinstalled `basset` and a full clone. To enforce a gate across application repositories, install a separately reviewed scanner build in the runner. Keep the HMAC key and trusted inventory out of untrusted pull-request jobs. Default candidate detection works without either.
 
 For a local pre-commit configuration after `cargo install --path .`:
 

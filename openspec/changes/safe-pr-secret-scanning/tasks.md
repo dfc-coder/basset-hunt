@@ -18,6 +18,6 @@
 
 ## 4. Wire the PR workflow and align the roadmap
 
-- [ ] 4.1 Update the GitHub Actions pull-request path to pass event base/head SHAs to range mode, retain SARIF artifacts on upload failure, and isolate SARIF upload behind least-privilege permissions; verify the workflow does not use `pull_request_target` or expose secrets to fork code.
-- [ ] 4.2 Update `docs/plan-de-actualizacion.md` to record the new M3 contract, global inline-marker policy, Basset/TruffleHog status terminology difference, pinned TruffleHog v3.100.1 no-verification comparison, and deferred commit-metadata/decoder gaps; verify links and roadmap acceptance criteria match the specs.
-- [ ] 4.3 Run `cargo build --release --locked`, `cargo test --locked`, `python3 tests/test_iam.py`, and `python3 tests/e2e.py target/release/basset`; verify a local SARIF fixture is secret-free and the PR workflow's expected exit/artifact behavior is documented.
+- [x] 4.1 Update the GitHub Actions pull-request path to pass event base/head SHAs to range mode, retain SARIF artifacts on upload failure, and isolate SARIF upload behind least-privilege permissions; verify the workflow does not use `pull_request_target` or expose secrets to fork code.
+- [x] 4.2 Update `docs/plan-de-actualizacion.md` to record the new M3 contract, global inline-marker policy, Basset/TruffleHog status terminology difference, pinned TruffleHog v3.100.1 no-verification comparison, and deferred commit-metadata/decoder gaps; verify links and roadmap acceptance criteria match the specs.
+- [x] 4.3 Run `cargo build --release --locked`, `cargo test --locked`, `python3 tests/test_iam.py`, and `python3 tests/e2e.py target/release/basset`; verify a local SARIF fixture is secret-free and the PR workflow's expected exit/artifact behavior is documented.

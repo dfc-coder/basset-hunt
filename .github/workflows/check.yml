@@ -1,5 +1,7 @@
 name: Build and audit
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
 permissions:
   contents: read
 jobs:
@@ -14,4 +16,42 @@ jobs:
       - run: cargo test --locked
       - run: python3 tests/test_iam.py
       - run: python3 tests/e2e.py target/release/basset
-      - run: target/release/basset git .
+      - name: Scan pull request range
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: target/release/basset git-range . --base "$BASE_SHA" --head "$HEAD_SHA" --format sarif > basset.sarif
+      - name: Scan pushed history
+        if: github.event_name == 'push'
+        run: target/release/basset git .
+      - name: Preserve pull request SARIF
+        if: always() && github.event_name == 'pull_request' && hashFiles('basset.sarif') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: basset-sarif
+          path: basset.sarif
+          if-no-files-found: warn
+          retention-days: 14
+  upload-sarif:
+    needs: scan
+    if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      security-events: write
+    steps:
+      - name: Download SARIF artifact
+        if: always()
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: basset-sarif
+          path: sarif
+      - name: Upload SARIF to code scanning
+        if: hashFiles('sarif/basset.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
+        with:
+          sarif_file: sarif/basset.sarif
+          category: basset
