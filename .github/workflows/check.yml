@@ -15,6 +15,7 @@ jobs:
       - run: cargo build --release --locked
       - run: cargo test --locked
       - run: python3 tests/test_iam.py
+      - run: python3 tests/test_bench_gate.py
       - run: python3 tests/e2e.py target/release/basset
       - name: Scan pull request range
         if: github.event_name == 'pull_request'
@@ -33,6 +34,36 @@ jobs:
           path: basset.sarif
           if-no-files-found: warn
           retention-days: 14
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: cargo build --release --locked
+      - name: Install pinned comparison tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools" && cd "$RUNNER_TEMP/tools"
+          fetch() { curl -fsSL -o "$2" "$1" && echo "$3  $2" | sha256sum -c - && tar xzf "$2" "$4"; }
+          fetch https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            gitleaks.tar.gz 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb gitleaks
+          fetch https://github.com/trufflesecurity/trufflehog/releases/download/v3.100.1/trufflehog_3.100.1_linux_amd64.tar.gz \
+            trufflehog.tar.gz b2460688116f29ce33f1afe16d14fef3fa3db928e74ba55a6c9fed392c60ad69 trufflehog
+          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
+      - name: Run comparative benchmark
+        run: |
+          python3 bench/run.py "$RUNNER_TEMP/bench"
+          cat "$RUNNER_TEMP/bench/report.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-report
+          path: |
+            ${{ runner.temp }}/bench/report.json
+            ${{ runner.temp }}/bench/report.md
+          if-no-files-found: warn
+          retention-days: 30
   upload-sarif:
     needs: scan
     if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
