@@ -50,6 +50,7 @@ Como extensión posterior, evaluar importar alertas de GitHub Secret Scanning co
 ## Backlog posterior
 
 - **M3 diferido:** escaneo de mensajes, autores y notas de commits, y decodificación de formatos/archivos comprimidos; no afirmar cobertura para estos datos.
+- **Mejora posterior (v0.2):** cobertura de merges con `git diff-tree --cc`, superior al referente. TruffleHog v3.100.1 usa `git log --patch` sin `--cc`, que no emite diff para merges, y su parser no entiende el formato combinado (`@@@`). El diff combinado contiene solo líneas ausentes de todos los padres, por lo que cubriría los secretos escritos al resolver un conflicto sin reportar lo importado de la otra rama.
 - **M5:** conectores GitHub y S3 descritos arriba. Después priorizar fuentes adicionales —gists/forks seleccionados, Hugging Face y exportaciones de colaboración— según incidentes y costo de mantenimiento.
 - **Investigación separada:** cobertura de objetos Git inalcanzables en copias locales bajo custodia del equipo. Documentar clon, retención y recolección de basura antes de prometer cobertura.
 - **Contexto de remediación:** añadir entorno junto a responsable, runbook, antigüedad y procedencia de permisos. Medir si reduce el tiempo hasta la rotación.
