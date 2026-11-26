@@ -9,6 +9,7 @@ import base64
 import gzip
 import io
 import json
+import math
 import os
 import random
 import string
@@ -29,8 +30,50 @@ def pick(rng, alphabet, n):
     return "".join(rng.choice(alphabet) for _ in range(n))
 
 
+def probable_prime(n, rng):
+    if n % 2 == 0 or any(n % p == 0 for p in (3, 5, 7, 11, 13, 17, 19, 23, 29, 31)):
+        return False
+    d, s = n - 1, 0
+    while d % 2 == 0:
+        d, s = d // 2, s + 1
+    for _ in range(40):
+        x = pow(rng.randrange(2, n - 2), d, n)
+        if x in (1, n - 1):
+            continue
+        for _ in range(s - 1):
+            x = pow(x, 2, n)
+            if x == n - 1:
+                break
+        else:
+            return False
+    return True
+
+
+def prime(rng, bits):
+    while True:
+        n = rng.getrandbits(bits) | (3 << (bits - 2)) | 1
+        if probable_prime(n, rng):
+            return n
+
+
+def der(tag, body):
+    size = len(body)
+    length = bytes([size]) if size < 128 else bytes([0x80 | (size.bit_length() + 7) // 8]) + size.to_bytes((size.bit_length() + 7) // 8, "big")
+    return bytes([tag]) + length + body
+
+
 def private_key(rng):
-    body = "\n".join(pick(rng, ALNUM + "+/", 64) for _ in range(12))
+    """A valid, freshly generated 2048-bit PKCS#1 RSA key that belongs to nothing."""
+    e = 65537
+    while True:
+        p, q = prime(rng, 1024), prime(rng, 1024)
+        phi = (p - 1) * (q - 1)
+        if p != q and math.gcd(e, phi) == 1:
+            break
+    d = pow(e, -1, phi)
+    fields = [0, p * q, e, d, p, q, d % (p - 1), d % (q - 1), pow(q, -1, p)]
+    encoded = base64.b64encode(der(0x30, b"".join(der(0x02, f.to_bytes(f.bit_length() // 8 + 1, "big")) for f in fields))).decode()
+    body = "\n".join(encoded[i:i + 64] for i in range(0, len(encoded), 64))
     return f"{DASH}BEGIN RSA PRIVATE KEY{DASH}\n{body}\n{DASH}END RSA PRIVATE KEY{DASH}"
 
 
@@ -53,6 +96,8 @@ POSITIVES = [
 ]
 
 GENERATORS = {provider: (family, make) for provider, family, make in POSITIVES}
+# Secrets that appear next to an identifier in real leaks; written on the following line.
+COMPANIONS = {"aws": ("AWS_SECRET_ACCESS_KEY", lambda r: pick(r, ALNUM + "+/", 40))}
 ISSUED = []  # every secret value written, for the leak check
 
 # (kind, generator) -- realistic values that are not secrets
@@ -77,16 +122,17 @@ CONTEXTS = [
 FILLER = ["LOG_LEVEL=info", "REGION=eu-west-1", "TIMEOUT=30", "FEATURE_FLAGS=search,export", "REPLICAS=3"]
 
 
-def write_case(out, rng, case_id, key, value, multiline):
+def write_case(out, rng, case_id, key, value, multiline, companion=None):
     filler = rng.sample(FILLER, rng.randint(0, len(FILLER)))
     if multiline:
-        ext, line = "pem", value
+        ext, lines = "pem", [value]
     else:
         ext, render = rng.choice(CONTEXTS)
-        line = render(key, value)
+        lines = [render(key, value)] + ([render(*companion)] if companion else [])
     path = Path("files") / f"{case_id}.{ext}"
-    (out / path).write_text("\n".join(filler + [line]) + "\n")
-    return {"id": case_id, "path": path.as_posix(), "line": len(filler) + 1}
+    (out / path).write_text("\n".join(filler + lines) + "\n")
+    case = {"id": case_id, "path": path.as_posix(), "line": len(filler) + 1}
+    return case | ({"companion_line": len(filler) + 2} if companion else {})
 
 
 GIT_ENV = {
@@ -101,6 +147,15 @@ def make(provider, rng):
     value = GENERATORS[provider][1](rng)
     ISSUED.append(value)
     return value
+
+
+def companion(provider, rng):
+    if provider not in COMPANIONS:
+        return None
+    key, make_value = COMPANIONS[provider]
+    value = make_value(rng)
+    ISSUED.append(value)
+    return key, value
 
 
 def secret_case(case_id, provider, **fields):
@@ -130,7 +185,7 @@ def archives(out, rng):
         z.writestr(zipfile.ZipInfo(zip_entry, date_time=(2026, 1, 1, 0, 0, 0)),
                    f"LOG_LEVEL=info\nSLACK_TOKEN={make('slack', rng)}\n" + "FEATURE_FLAGS=search,export\n" * 40,
                    compress_type=zipfile.ZIP_DEFLATED)
-    data = f"REGION=eu-west-1\nAWS_KEY={make('aws', rng)}\n".encode()
+    data = f"REGION=eu-west-1\nAWS_KEY={make('aws', rng)}\n{'='.join(companion('aws', rng))}\n".encode()
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as tar:
         info = tarfile.TarInfo(tar_entry)
@@ -188,7 +243,8 @@ def generate(out, seed, per_family):
     ISSUED.clear()
     for provider, family, _ in POSITIVES:
         for n in range(per_family):
-            case = write_case(out, rng, f"pos-{provider}-{n}", f"{provider.upper()}_SECRET", make(provider, rng), family == "private-key")
+            case = write_case(out, rng, f"pos-{provider}-{n}", f"{provider.upper()}_SECRET", make(provider, rng),
+                              family == "private-key", companion(provider, rng))
             cases.append(case | {"secret": True, "family": family, "provider": provider, "source": "files", "encoding": "plain"})
     for n, (kind, negative) in enumerate(NEGATIVES):
         case = write_case(out, rng, f"neg-{kind}-{n}", "REFERENCE", negative(rng), False)

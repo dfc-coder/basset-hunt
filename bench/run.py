@@ -55,7 +55,7 @@ def matches(case, mode, h):
         return (h["path"] or "").split("!")[0] == case["path"]
     field = case.get("field", "file")
     if field == "file":
-        return h["path"] == case["path"] and h["line"] == case["line"]
+        return h["path"] == case["path"] and h["line"] in (case["line"], case.get("companion_line"))
     if field == "message":
         return h["commit"] == case["commit"] and h["path"] in (None, f"{case['commit']}:message")
     return h["path"] in (case["commit"], f"{case['commit']}:notes")
