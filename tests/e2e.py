@@ -169,10 +169,29 @@ def main() -> None:
         no_key_doc = json.loads(no_key_run.stdout)
         assert no_key_doc["runs"][0]["results"][0]["partialFingerprints"] == sarif_fingerprint
 
+        unicode_secret = range_repo / "unicode.env"
+        unicode_secret.write_text(f"é GITHUB_TOKEN={TOKEN} # gitleaks:allow\n")
+        git(range_repo, "add", "--", unicode_secret.name)
+        git(range_repo, "commit", "-qm", "add marked unicode secret")
+        unicode_head = git(range_repo, "rev-parse", "HEAD")
+        unicode_range = ["git-range", str(range_repo), "--base", key_commit,
+                         "--head", unicode_head, "--format", "sarif"]
+        unicode_run = subprocess.run([BIN, *unicode_range], text=True, capture_output=True, env=ENV)
+        assert unicode_run.returncode == 1, (unicode_run.returncode, unicode_run.stderr)
+        unicode_doc = json.loads(unicode_run.stdout)
+        unicode_results = unicode_doc["runs"][0]["results"]
+        token_result = next(result for result in unicode_results
+                            if result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+                            == unicode_secret.name)
+        assert token_result["locations"][0]["physicalLocation"]["region"]["startColumn"] == 16
+        marked_findings = scan("git-range", str(range_repo), "--base", key_commit,
+                               "--head", unicode_head, code=1)
+        assert any(r["location"]["path"] == unicode_secret.name for r in marked_findings)
+
         nested_findings = scan("git-range", str(nested_dir), "--base", base, "--head", key_commit, code=1)
         assert any(r["location"]["path"] == key_path.name for r in nested_findings)
 
-        pathspec_base = key_commit
+        pathspec_base = unicode_head
         key_path.write_text(private_key + "SAFE_RANGE_CHANGE=true\n")
         pathspec_decoy.write_text("unchanged\ndecoy change\n")
         git(range_repo, "add", "--", key_path.name, pathspec_decoy.name)

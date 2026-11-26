@@ -132,7 +132,7 @@ impl<W: Write> Audit<W> {
             if let Some(sarif) = &mut self.sarif {
                 let was_truncated = sarif.is_truncated();
                 let accepted = sarif.add(&hit.rule_id, &hit.rule_description, loc.path,
-                    hit.line, hit.col, loc.revision)?;
+                    hit.line, hit.col_utf16, loc.revision)?;
                 if !accepted && !was_truncated { self.incomplete += 1; }
                 self.emitted += u64::from(accepted);
             } else {
