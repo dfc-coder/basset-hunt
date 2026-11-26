@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
-use secrets_scanner::Scanner;
+use secrets_scanner::{ScanConfig, Scanner};
 use serde::Serialize;
 use serde_json::json;
 
@@ -119,7 +119,8 @@ fn run() -> Result<u8> {
         println!("{}", evidence::fingerprint(&key, &bytes));
         return Ok(0);
     }
-    let engine = Scanner::from_bundled().map_err(|_| anyhow::anyhow!("could not compile bundled detector rules"))?;
+    let engine = Scanner::from_bundled().map_err(|_| anyhow::anyhow!("could not compile bundled detector rules"))?
+        .with_config(ScanConfig { honor_allow_markers: false, ..ScanConfig::default() });
     let count = engine.engine().rule_count();
     ensure!(count >= 800, "catalog contains only {count} compiled rules");
     if let Source::Rules { list } = &cli.command {

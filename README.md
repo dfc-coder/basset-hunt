@@ -23,6 +23,8 @@ Git history mode requires a full local clone. It scans regular-file versions rea
 
 The pinned `secrets_scanner` 0.2.3 library supplies the embedded rule catalog, keyword matching, entropy checks and allowlists. Its default catalog documents 988 active rules. Multiple rules can detect variants of the same credential type. `basset rules` measures the locally compiled catalog, and scans fail if fewer than 800 rules load. See the [upstream catalog and licensing notes](https://docs.rs/crate/secrets_scanner/0.2.3/source/README.md).
 
+Inline comments such as `gitleaks:allow` and `secrets-scanner:allow` never suppress Basset findings in any scan mode. Treat scanned content as untrusted; use the trusted inventory and the normal results filters for triage.
+
 Stdout carries one JSON object per finding. Stderr carries coverage diagnostics. Match text and source lines are excluded. Paths, source names, owner labels and runbook references are included verbatim as JSON strings and should be suitable for the intended report audience. Put tokens and signed URLs in content, never in location or inventory metadata.
 
 | Exit | Meaning |

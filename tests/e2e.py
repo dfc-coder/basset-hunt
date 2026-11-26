@@ -43,7 +43,10 @@ def main() -> None:
     del legacy_env["BASSET_HMAC_KEY"]
     legacy_fp = subprocess.check_output([BIN, "fingerprint"], input=TOKEN, text=True, env=legacy_env)
     assert legacy_fp.strip() == digest
-    sample = f"release\nGITHUB_TOKEN={TOKEN}\n"
+    sample = f"release\nGITHUB_TOKEN={TOKEN} # gitleaks:allow\n"
+    scan("stdin", data=sample, code=1)
+    scan("stdin", data=f"GITHUB_TOKEN={TOKEN} # secrets-scanner:allow\n", code=1)
+    scan("stdin", data="ordinary comment # gitleaks:allow\n")
     candidates = scan("stdin", data=sample, code=1)
     assert any(r["line"] == 2 and r["fingerprint"] == digest and r["status"] == "unknown"
                for r in candidates)
@@ -70,6 +73,9 @@ def main() -> None:
         item = dict(source="chat", path="day-1", content=sample, revision="1")
         records = scan("records", data=json.dumps(item) + "\n", code=1)
         assert records[0]["location"]["source"] == "chat"
+        marked_file = root / "marked.env"
+        marked_file.write_text(sample)
+        scan("fs", str(marked_file), code=1)
         repo = root / "repo"
         repo.mkdir()
         git(repo, "init", "-q", "-b", "main")
