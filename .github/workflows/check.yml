@@ -10,7 +10,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - run: cargo build --release
+      - run: cargo build --release --locked
       - run: cargo test --locked
       - run: python3 tests/test_iam.py
       - run: python3 tests/e2e.py target/release/basset
