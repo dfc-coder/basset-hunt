@@ -33,6 +33,24 @@ pub(crate) struct Filter {
     entries: BTreeSet<Entry>,
 }
 
+fn location_fingerprint(rule: &str, path: &str, line: usize, column: usize) -> Result<String> {
+    let fingerprint = super::sarif::location_fingerprint(rule, path, line, column)?;
+    let digest = fingerprint
+        .strip_prefix("sha256:")
+        .context("invalid internal location fingerprint")?;
+    let mut grouped = String::with_capacity(fingerprint.len() + 15);
+    grouped.push_str("sha256:");
+    for (index, group) in digest.as_bytes().chunks(4).enumerate() {
+        if index > 0 {
+            grouped.push('-');
+        }
+        for byte in group {
+            grouped.push(char::from(*byte));
+        }
+    }
+    Ok(grouped)
+}
+
 impl Filter {
     pub(crate) fn load(path: &Path) -> Result<Self> {
         let file =
@@ -62,11 +80,15 @@ impl Filter {
                 .location_fingerprint
                 .strip_prefix("sha256:")
                 .context("invalid location fingerprint in baseline")?;
+            let groups: Vec<_> = fingerprint.split('-').collect();
             ensure!(
-                fingerprint.len() == 64
-                    && fingerprint
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                groups.len() == 16
+                    && groups.iter().all(|group| {
+                        group.len() == 4
+                            && group
+                                .bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    }),
                 "invalid location fingerprint in baseline"
             );
         }
@@ -85,7 +107,7 @@ impl Filter {
     ) -> Result<bool> {
         let entry = Entry {
             rule: rule.to_owned(),
-            location_fingerprint: super::sarif::location_fingerprint(rule, path, line, column)?,
+            location_fingerprint: location_fingerprint(rule, path, line, column)?,
         };
         Ok(self.entries.contains(&entry))
     }
@@ -95,7 +117,7 @@ impl Writer {
     pub(crate) fn add(&mut self, rule: &str, path: &str, line: usize, column: usize) -> Result<()> {
         self.entries.insert(Entry {
             rule: rule.to_owned(),
-            location_fingerprint: super::sarif::location_fingerprint(rule, path, line, column)?,
+            location_fingerprint: location_fingerprint(rule, path, line, column)?,
         });
         Ok(())
     }

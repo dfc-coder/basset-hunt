@@ -44,7 +44,7 @@ A baseline accepts only findings whose detector and location fingerprint match a
 basset git ./service --write-baseline /secure/service-baseline.json
 ```
 
-The command writes versioned JSON containing rule IDs and SHA-256 fingerprints of rule/path/line/column, never the detected value or a hash of it. It overwrites the requested output path atomically. An incomplete scan exits 2 and does not write a partial baseline. Review and protect the baseline as owner-managed policy; do not treat it as a general ignore list.
+The command writes versioned JSON containing rule IDs and SHA-256 fingerprints of rule/path/line/column (hex digits grouped in blocks of four), never the detected value or a hash of it. Grouping avoids false positives when the baseline file itself is scanned. It overwrites the requested output path atomically. An incomplete scan exits 2 and does not write a partial baseline. Review and protect the baseline as owner-managed policy; do not treat it as a general ignore list.
 
 Pass the file explicitly to apply it. For example, a pull-request range scan can use a reviewed baseline generated from the same repository:
 

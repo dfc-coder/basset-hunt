@@ -84,6 +84,10 @@ def main() -> None:
         assert baseline_data["entries"]
         assert all(set(row) == {"rule", "location_fingerprint"}
                    for row in baseline_data["entries"])
+        for row in baseline_data["entries"]:
+            groups = row["location_fingerprint"].removeprefix("sha256:").split("-")
+            assert len(groups) == 16 and all(len(group) == 4 for group in groups)
+        scan("fs", str(baseline))
         assert TOKEN not in baseline_text
         assert hashlib.sha256(TOKEN.encode()).hexdigest() not in baseline_text
         assert digest not in baseline_text
