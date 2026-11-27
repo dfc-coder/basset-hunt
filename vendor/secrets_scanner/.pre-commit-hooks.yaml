@@ -1,0 +1,19 @@
+# Pre-commit hook configuration for secrets-scanner.
+#
+# Add to your .pre-commit-config.yaml:
+#
+#   repos:
+#     - repo: https://github.com/whit3rabbit/secrets-scanner
+#       rev: v0.1.0
+#       hooks:
+#         - id: secrets-scanner
+
+- id: secrets-scanner
+  name: Scan for secrets
+  description: Scan staged index blobs for leaked secrets, API keys, and credentials
+  entry: secrets-scanner scan
+  language: rust
+  args: [".", "--staged", "--redact", "--no-context"]
+  pass_filenames: false
+  always_run: true
+  minimum_pre_commit_version: "2.9.2"

@@ -1,0 +1,18 @@
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  assets/local.toml — Local custom developer rules                        ║
+# ║                                                                          ║
+# ║  Add your own detection rules here in gitleaks-compatible TOML.          ║
+# ║  These rules are merged at build time and take precedence.               ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+title = "local custom rules"
+
+[[rules]]
+id = "my-internal-api-key"
+description = "Internal API key for Example Corp services"
+# Detection regex — applied after keyword pre-screening marks the rule as a candidate
+regex = 'MYCO_[A-Za-z0-9]{32,64}'
+# Keywords fed into the Aho-Corasick pre-filter (lowercase)
+keywords = ["myco_"]
+# Optional: only fire on specific entropy (bits/byte)
+entropy = 3.5

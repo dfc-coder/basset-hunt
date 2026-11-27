@@ -1,0 +1,164 @@
+name: Publish Node Bindings to NPM
+
+# Multi-platform NAPI-RS publish: build the native addon for each target on a
+# native runner, then publish ONE "fat" package bundling all platform binaries
+# (the loader picks the matching one at runtime). One npm package = one trusted
+# publisher, no per-platform packages.
+#
+# Triggers:
+#   - tag push v* -> real publish (alongside release.yml).
+#   - workflow_dispatch -> defaults to a dry run that builds every target and
+#     validates packaging WITHOUT publishing (use this before cutting a tag).
+
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Build all targets and validate packaging without publishing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write # Required for npm trusted publishing (OIDC) + automatic provenance
+
+defaults:
+  run:
+    working-directory: bindings/node
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          # x86_64 cross-compiled on the arm64 mac (Apple toolchain handles it,
+          # and the scarce macos-13 Intel runner queues for ages). Skip the
+          # self-test: an x86_64 .node can't load in the runner's arm64 node.
+          - target: x86_64-apple-darwin
+            runner: macos-14
+            skip-test: true
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+
+      # --no-workspaces: install bindings/node standalone, NOT the parent bindings/
+      # workspace (whose node-mcp member depends on the published darwin/arm64-only
+      # rsecrets-scanner@0.1.0, which is EBADPLATFORM on linux/windows runners).
+      # `npm ci`, not `npm install --no-package-lock`: the lock-free resolve started
+      # crashing npm outright ("Cannot read properties of null (reading 'edgesOut')")
+      # on every target. That is environmental, not a repo regression -- it
+      # reproduces on the last commit that published green. `npm ci` against the
+      # committed standalone lock resolves cleanly and is reproducible besides.
+      # The lock is now generated OUTSIDE the bindings/ workspace, so reading it
+      # standalone no longer hits the ENOVERSIONS skew that motivated the old flags
+      # -- keep regenerating it that way (see docs/RELEASE.md).
+      # Cost of `npm ci`: it hard-fails if bindings/node/package-lock.json drifts
+      # from package.json, so both must be bumped together on release.
+      - name: Install Node dependencies
+        run: npm ci --no-audit --no-fund --no-workspaces
+
+      # Invoke napi via `npm run` (PATH includes node_modules/.bin), NOT `npx`:
+      # `npx napi` resolves the bare `napi` package name from the registry rather
+      # than the locally installed @napi-rs/cli that provides the bin, and fetches
+      # the wrong thing (ENOVERSIONS). `build:ci` = napi build --release
+      # --platform --no-js; --platform suffixes the artifact
+      # (secrets_scanner_core.<target>.node) so `napi artifacts` can route it,
+      # --no-js preserves the hand-written index.js loader, --locked -> cargo.
+      - name: Build ${{ matrix.target }}
+        run: npm run build:ci -- --target ${{ matrix.target }} -- --locked
+
+      # Each native-target runner can load its freshly built binary; this proves
+      # the artifact works before publishing. Skipped for cross-compiled targets
+      # (the host arch differs, so the binary can't load here).
+      - name: Test built artifact
+        if: ${{ !matrix.skip-test }}
+        run: npm test
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.target }}
+          path: bindings/node/secrets_scanner_core.*.node
+          if-no-files-found: error
+
+  publish:
+    name: Publish to NPM
+    needs: build
+    runs-on: ubuntu-latest
+    # Trusted publishing via OIDC -- no NPM_TOKEN. Auth comes from the id-token
+    # (workflow-level permission above); provenance is generated automatically
+    # for a public repo + public package. Requires npm >= 11.5.1 (installed below).
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: "https://registry.npmjs.org/"
+          package-manager-cache: false # never cache in a release build
+
+      # node 24's bundled npm can be < 11.5.1; trusted publishing (OIDC) needs
+      # >= 11.5.1, so pin the latest.
+      - name: Ensure OIDC-capable npm
+        run: npm install -g npm@latest
+
+      # The single "fat" package bundles every platform's binary. Drop all built
+      # .node files into the package root so `files: ["*.node"]` includes them.
+      # No `npm install` here: we only `npm publish` (and --ignore-scripts skips
+      # the prepack rebuild), so no devDeps/toolchain are needed.
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bindings/node
+          pattern: bindings-*
+          merge-multiple: true
+
+      # Fail-safe: only a tag push (or an explicit dispatch with dry-run=false)
+      # publishes. Any other dispatch -- including one with no inputs, e.g. when
+      # the input schema is not yet on the default branch -- is a dry run, so a
+      # validation run can never publish by accident.
+      - name: Resolve dry-run flag
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.dry-run }}" = "false" ]; then
+            echo "dry=" >> "$GITHUB_OUTPUT"
+          else
+            echo "dry=--dry-run" >> "$GITHUB_OUTPUT"
+            echo "::notice::Dry run: packaging the fat package, no publish."
+          fi
+
+      - name: Verify bundled binaries
+        run: ls -l secrets_scanner_core.*.node
+
+      # One package containing every platform's binary; the loader picks the right
+      # one at runtime. --ignore-scripts skips the prepack rebuild (we publish the
+      # downloaded matrix artifacts, not a host rebuild). --access public for the
+      # scoped package; OIDC trusted publishing (no token), provenance automatic.
+      - name: Publish
+        run: npm publish --access public --ignore-scripts ${{ steps.mode.outputs.dry }}

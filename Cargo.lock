@@ -321,8 +321,6 @@ dependencies = [
 [[package]]
 name = "secrets_scanner"
 version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f51d3e9b1732051e9d5b17c071414ffe702231a6af3df74492ea0bb06119cbc5"
 dependencies = [
  "aho-corasick",
  "hex",

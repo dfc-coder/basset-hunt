@@ -15,6 +15,7 @@ jobs:
       - run: cargo build --release --locked
       - run: cargo test --locked
       - run: python3 tests/test_iam.py
+      - run: python3 vendor/secrets_scanner/scripts/validate_kingfisher_sanitization.py
       - run: python3 tests/test_bench_gate.py
       - run: python3 tests/e2e.py target/release/basset
       - name: Scan pull request range
@@ -22,10 +23,10 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: target/release/basset git-range . --base "$BASE_SHA" --head "$HEAD_SHA" --format sarif > basset.sarif
+        run: target/release/basset git-range . --base "$BASE_SHA" --head "$HEAD_SHA" --format sarif --baseline bench/vendor-secrets.baseline.json > basset.sarif
       - name: Scan pushed history
         if: github.event_name == 'push'
-        run: target/release/basset git .
+        run: target/release/basset git . --baseline bench/vendor-secrets.baseline.json
       - name: Preserve pull request SARIF
         if: always() && github.event_name == 'pull_request' && hashFiles('basset.sarif') != ''
         uses: actions/upload-artifact@v4
