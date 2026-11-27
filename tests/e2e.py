@@ -76,6 +76,30 @@ def main() -> None:
         marked_file = root / "marked.env"
         marked_file.write_text(sample)
         scan("fs", str(marked_file), code=1)
+        baseline = root / "baseline.json"
+        scan("stdin", "--write-baseline", str(baseline), data=sample)
+        baseline_text = baseline.read_text()
+        baseline_data = json.loads(baseline_text)
+        assert baseline_data["version"] == 1
+        assert baseline_data["entries"]
+        assert all(set(row) == {"rule", "location_fingerprint"}
+                   for row in baseline_data["entries"])
+        assert TOKEN not in baseline_text
+        assert hashlib.sha256(TOKEN.encode()).hexdigest() not in baseline_text
+        assert digest not in baseline_text
+        if os.name != "nt":
+            protected = root / "protected.txt"
+            protected.write_text("preserve this file")
+            baseline_link = root / "baseline-link.json"
+            baseline_link.symlink_to(protected)
+            scan("stdin", "--write-baseline", str(baseline_link), data=sample)
+            assert protected.read_text() == "preserve this file"
+            assert not baseline_link.is_symlink()
+            assert json.loads(baseline_link.read_text())["entries"]
+        incomplete_baseline = root / "incomplete-baseline.json"
+        scan("stdin", "--write-baseline", str(incomplete_baseline), "--max-bytes", "5",
+             data="abcdef", code=2)
+        assert not incomplete_baseline.exists()
         repo = root / "repo"
         repo.mkdir()
         git(repo, "init", "-q", "-b", "main")

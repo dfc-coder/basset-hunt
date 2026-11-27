@@ -1,3 +1,4 @@
+mod baseline;
 mod evidence;
 mod git;
 mod inputs;
@@ -19,6 +20,8 @@ use serde_json::json;
 struct Cli {
     #[command(subcommand)]
     command: Source,
+    #[arg(long, global = true, value_name = "FILE")]
+    write_baseline: Option<PathBuf>,
     #[arg(long, global = true)]
     inventory: Option<PathBuf>,
     #[arg(long, global = true, default_value_t = 86400)]
@@ -77,6 +80,7 @@ pub struct Audit<W> {
     limit: u64,
     out: W,
     sarif: Option<sarif::Writer>,
+    baseline: Option<(PathBuf, baseline::Writer)>,
     documents: u64,
     candidates: u64,
     emitted: u64,
@@ -124,6 +128,10 @@ impl<W: Write> Audit<W> {
                 }
             }
             self.candidates += 1;
+            if let Some((_, baseline)) = &mut self.baseline {
+                baseline.add(&hit.rule_id, loc.path, hit.line, hit.col)?;
+                continue;
+            }
             let digest = self.key.as_ref().filter(|_| !raw.is_empty())
                 .map(|key| evidence::fingerprint(key, raw));
             let (status, record) = self.inventory.lookup(digest.as_deref(), self.now, self.max_age);
@@ -169,6 +177,11 @@ fn run() -> Result<u8> {
     let cli = Cli::parse();
     let sarif_output = matches!(&cli.command,
         Source::GitRange { format: RangeFormat::Sarif, .. });
+    if cli.write_baseline.is_some()
+        && matches!(cli.command, Source::Fingerprint | Source::Rules { .. })
+    {
+        return preflight_failure(anyhow::anyhow!("--write-baseline requires a scan source"), sarif_output);
+    }
     if matches!(cli.command, Source::Fingerprint) {
         let key = evidence::key()?.context("set BASSET_HMAC_KEY to fingerprint a value")?;
         let bytes = inputs::bounded(io::stdin().lock(), cli.max_bytes)?
@@ -195,6 +208,7 @@ fn run() -> Result<u8> {
         println!("{}", json!({"compiled_rules":count,"engine":"secrets_scanner/0.2.3"}));
         return Ok(0);
     }
+    let baseline_path = cli.write_baseline.clone();
     let verified_only = cli.only_verified || cli.results == Filter::Verified;
     let key = match evidence::key() { Ok(key) => key, Err(error) => return preflight_failure(error, sarif_output) };
     if verified_only && cli.inventory.is_none() {
@@ -211,7 +225,8 @@ fn run() -> Result<u8> {
     let mut audit = Audit {
         engine, key, inventory, verified_only, now, max_age: cli.max_age_seconds,
         limit: cli.max_bytes, out: BufWriter::new(io::stdout().lock()),
-        sarif: sarif_output.then(sarif::Writer::default), documents: 0,
+        sarif: sarif_output.then(sarif::Writer::default),
+        baseline: baseline_path.map(|path| (path, baseline::Writer::default())), documents: 0,
         candidates: 0, emitted: 0, incomplete: 0,
     };
     let result = match cli.command {
@@ -230,6 +245,10 @@ fn run() -> Result<u8> {
     }
     audit.out.flush()?;
     result?;
+    if let Some((path, baseline)) = audit.baseline.take() {
+        ensure!(audit.incomplete == 0, "cannot write a baseline from an incomplete scan");
+        baseline.write(&path)?;
+    }
     eprintln!("{}", json!({"documents":audit.documents, "candidates":audit.candidates,
         "reported":audit.emitted,"incomplete":audit.incomplete}));
     Ok(if audit.incomplete > 0 { 2 } else if audit.emitted > 0 { 1 } else { 0 })

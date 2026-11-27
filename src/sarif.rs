@@ -55,8 +55,7 @@ impl Writer {
             return Ok(false);
         }
 
-        let identity = serde_json::to_vec(&("basset/v1", rule_id, path, line, column))?;
-        let fingerprint = format!("sha256:{}", hex::encode(Sha256::digest(identity)));
+        let fingerprint = location_fingerprint(rule_id, path, line, column)?;
         self.rules
             .entry(rule_id.to_owned())
             .or_insert_with(|| description.to_owned());
@@ -106,6 +105,16 @@ impl Writer {
         serde_json::to_writer(&mut *output, &document)?;
         writeln!(output)
     }
+}
+
+pub(crate) fn location_fingerprint(
+    rule_id: &str,
+    path: &str,
+    line: usize,
+    column: usize,
+) -> Result<String> {
+    let identity = serde_json::to_vec(&("basset/v1", rule_id, path, line, column))?;
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(identity))))
 }
 
 fn uri_path(path: &str, keep_drive_colon: bool) -> String {
