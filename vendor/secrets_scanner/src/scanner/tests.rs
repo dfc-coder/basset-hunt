@@ -102,6 +102,51 @@ fn from_toml_rejects_invalid_custom_regex() {
 }
 
 #[test]
+fn lazy_detection_matches_eager_and_compiles_only_candidate_rules() {
+    let toml = r#"
+title = "lazy regex"
+[[rules]]
+id = "selected"
+regex = 'primary_[A-Za-z0-9]{8}'
+keywords = ["primary_"]
+[[rules]]
+id = "path-filtered"
+regex = 'filtered_[A-Za-z0-9]{8}'
+path = '\.pem$'
+keywords = ["primary_"]
+[[rules]]
+id = "not-selected"
+regex = 'unused_[A-Za-z0-9]{8}'
+keywords = ["unused_"]
+"#;
+    let eager = Scanner::from_engine(
+        crate::rules::engine::RuleEngine::from_toml(toml).expect("eager engine"),
+    );
+    let lazy = Scanner::from_engine(
+        crate::rules::engine::RuleEngine::from_toml_lazy(toml).expect("lazy engine"),
+    );
+    let content = b"TOKEN=primary_ABCDEFGH";
+
+    let eager_findings = serde_json::to_value(eager.scan_bytes("test.env", content))
+        .expect("serialize eager findings");
+    let lazy_findings = serde_json::to_value(lazy.scan_bytes("test.env", content))
+        .expect("serialize lazy findings");
+    assert_eq!(lazy_findings, eager_findings);
+    assert!(lazy.engine().keyworded_rules()[0]
+        .regex
+        .as_ref()
+        .expect("selected regex")
+        .is_compiled());
+    for rule in &lazy.engine().keyworded_rules()[1..] {
+        assert!(
+            !rule.regex.as_ref().expect("unselected regex").is_compiled(),
+            "{} should remain uncompiled",
+            rule.id
+        );
+    }
+}
+
+#[test]
 fn from_file_rejects_invalid_custom_regex() {
     let file = tempfile::NamedTempFile::new().expect("temp rules");
     std::fs::write(file.path(), INVALID_CUSTOM_RULES).expect("write rules");

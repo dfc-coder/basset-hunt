@@ -93,6 +93,19 @@ Perfil local de la compilación de cada regex de las reglas empaquetadas (987 re
 
 Los tres mayores outliers de memoria/tiempo son `pypi-upload-token`, `vault-batch-token` y `generic-api-key`; después aparece un grupo de reglas de unos 13 MB cada una. El patrón de PyPI admite hasta 1000 caracteres (`[\\w-]{50,1000}`), y el `size_limit` de 100 MiB no impide que compile con un pico ligeramente mayor. Los picos por regla son mediciones aisladas y **no se suman como RSS del proceso**; la cifra acumulada de asignaciones independientes fue 1.198 GB. La medición del proceso Basset completo en CI fue 670 MB RSS. La evidencia apunta a que la compilación eager de regex domina el arranque y justifica probar compilación diferida; no demuestra por sí sola qué optimización dará el mejor resultado.
 
+## Compilación diferida
+
+El motor empaquetado usa `OnceLock` por regla: el Aho-Corasick selecciona candidatos y la regex de contenido se compila al primer uso, después de comprobar también el filtro de ruta. La construcción explícita de reglas conserva el camino eager y estricto. Un test del motor compara los hallazgos eager y lazy y comprueba que reglas no candidatas o filtradas por ruta siguen sin compilarse.
+
+Comparación local en Linux x86_64 (Rust 1.99.0), sobre el corpus determinista `bench/generate.py --seed 321`, midiendo un escaneo de directorio o de Git con `/usr/bin/time`. Se comparó el binario eager anterior con el binario lazy; la salida JSONL fue byte por byte idéntica en ambos modos. Los casos positivos devuelven exit 1 en ambas versiones.
+
+| Modo | Eager (s / MiB RSS) | Lazy (s / MiB RSS) |
+|---|---:|---:|
+| `fs` | 2,87 / 669,5 | 0,24 / 77,0 |
+| `git` | 2,84 / 654,4 | 0,13 / 45,2 |
+
+Estas cifras locales incluyen el arranque y un escaneo pequeño; no reemplazan el benchmark comparativo ni garantizan el mismo rendimiento en CI.
+
 ### Reproducibilidad y limitaciones
 
 Los casos de RSA son claves válidas y los casos AWS contienen access key ID y secret access key sintéticos. Los valores usan aleatoriedad determinista con semilla; no son credenciales reales. Las métricas funcionales son reproducibles; tiempo y memoria dependen del runner. Esta línea base corresponde al corpus de la semilla 1 y versiones fijadas indicadas arriba.

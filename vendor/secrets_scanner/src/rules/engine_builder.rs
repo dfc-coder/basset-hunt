@@ -1,7 +1,7 @@
 use aho_corasick::AhoCorasick;
 use log::{debug, info, warn};
 
-use super::{CompiledRule, RuleEngine, RuleRef};
+use super::{CompiledRule, LazyRegex, RuleEngine, RuleRef};
 use crate::error::ScannerError;
 use crate::rules::allowlist::CompiledAllowlist;
 use crate::rules::validation::{
@@ -9,7 +9,10 @@ use crate::rules::validation::{
 };
 
 /// Decoupled builder function that parses TOML rules and constructs the compiled `RuleEngine`.
-pub(super) fn build_from_toml(toml_str: &str) -> Result<(RuleEngine, Vec<String>), ScannerError> {
+pub(super) fn build_from_toml(
+    toml_str: &str,
+    lazy_detection_regexes: bool,
+) -> Result<(RuleEngine, Vec<String>), ScannerError> {
     let config: RulesetConfig = toml::from_str(toml_str)?;
 
     let mut keyworded_rules = Vec::new();
@@ -51,21 +54,26 @@ pub(super) fn build_from_toml(toml_str: &str) -> Result<(RuleEngine, Vec<String>
     }
 
     for rule_config in &config.rules {
-        // Compile the detection regex if present — skip rules with invalid patterns
+        // The bundled engine defers detection regexes until a keyword candidate;
+        // strict/eager engine construction still validates and compiles them now.
         let regex = if let Some(ref reg_str) = rule_config.regex {
-            match compile_bytes_regex(reg_str) {
-                Ok(re) => Some(re),
-                Err(e) => {
-                    warn!(
-                        "[engine] Warning: skipping rule '{}' — invalid regex: {}",
-                        rule_config.id, e
-                    );
-                    issues.push(format!(
-                        "rule '{}' has an invalid detection regex: {}",
-                        rule_config.id, e
-                    ));
-                    skipped += 1;
-                    continue;
+            if lazy_detection_regexes {
+                Some(LazyRegex::new(&rule_config.id, reg_str))
+            } else {
+                match compile_bytes_regex(reg_str) {
+                    Ok(re) => Some(LazyRegex::with_compiled(&rule_config.id, reg_str, re)),
+                    Err(e) => {
+                        warn!(
+                            "[engine] Warning: skipping rule '{}' — invalid regex: {}",
+                            rule_config.id, e
+                        );
+                        issues.push(format!(
+                            "rule '{}' has an invalid detection regex: {}",
+                            rule_config.id, e
+                        ));
+                        skipped += 1;
+                        continue;
+                    }
                 }
             }
         } else {
@@ -74,23 +82,28 @@ pub(super) fn build_from_toml(toml_str: &str) -> Result<(RuleEngine, Vec<String>
 
         // Validate that secret_group index is within bounds of the regex's capture groups
         let mut secret_group = rule_config.secret_group;
-        if let (Some(ref re), Some(g)) = (&regex, secret_group) {
-            if g >= re.captures_len() {
-                warn!(
-                    "[engine] Warning: rule '{}' has secret_group {} but regex only has {} capture groups. Falling back to default group selection.",
-                    rule_config.id, g, re.captures_len()
-                );
-                // Record for the strict report so `Scanner::from_toml`/`from_file`
-                // rejects an explicit `--rules` file with an out-of-range group
-                // (it silently shifts the entropy/redaction/fingerprint span). The
-                // lenient bundled/cached tiers ignore `issues` and still downgrade.
-                issues.push(format!(
-                    "rule '{}' has secret_group {} but its regex has only {} capture group(s)",
-                    rule_config.id,
-                    g,
-                    re.captures_len()
-                ));
-                secret_group = None;
+        if !lazy_detection_regexes {
+            if let (Some(ref re), Some(g)) = (&regex, secret_group) {
+                let re = re.get().expect("eager regex is initialized");
+                if g >= re.captures_len() {
+                    warn!(
+                        "[engine] Warning: rule '{}' has secret_group {} but regex only has {} capture groups. Falling back to default group selection.",
+                        rule_config.id,
+                        g,
+                        re.captures_len()
+                    );
+                    // Record for the strict report so `Scanner::from_toml`/`from_file`
+                    // rejects an explicit `--rules` file with an out-of-range group
+                    // (it silently shifts the entropy/redaction/fingerprint span). The
+                    // lenient bundled/cached tiers ignore `issues` and still downgrade.
+                    issues.push(format!(
+                        "rule '{}' has secret_group {} but its regex has only {} capture group(s)",
+                        rule_config.id,
+                        g,
+                        re.captures_len()
+                    ));
+                    secret_group = None;
+                }
             }
         }
 
@@ -149,9 +162,11 @@ pub(super) fn build_from_toml(toml_str: &str) -> Result<(RuleEngine, Vec<String>
             let rule_idx = unkeyworded_rules.len();
             if is_path_only {
                 path_only_rules.push(RuleRef::Unkeyworded(rule_idx));
-            } else if let Some(ref reg_str) = rule_config.regex {
-                unkeyworded_set_patterns.push(reg_str.clone());
-                unkeyworded_set_rule_indices.push(rule_idx);
+            } else if !lazy_detection_regexes {
+                if let Some(ref reg_str) = rule_config.regex {
+                    unkeyworded_set_patterns.push(reg_str.clone());
+                    unkeyworded_set_rule_indices.push(rule_idx);
+                }
             }
             unkeyworded_rules.push(compiled_rule);
         } else {
@@ -180,7 +195,9 @@ pub(super) fn build_from_toml(toml_str: &str) -> Result<(RuleEngine, Vec<String>
         warn!("[engine] Skipped {skipped} rules with invalid regex patterns");
     }
 
-    let unkeyworded_regex_set = if unkeyworded_set_patterns.is_empty() {
+    let unkeyworded_regex_set = if lazy_detection_regexes {
+        None
+    } else if unkeyworded_set_patterns.is_empty() {
         None
     } else {
         match compile_bytes_regex_set(&unkeyworded_set_patterns) {

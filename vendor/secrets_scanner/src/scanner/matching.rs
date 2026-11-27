@@ -138,16 +138,19 @@ pub(super) fn check_rule_match_with_sink(
     content: &[u8],
     emit: &mut impl FnMut(Finding),
 ) {
-    let regex_re = match &rule.regex {
-        Some(re) => re,
-        None => return,
-    };
-
     if let Some(ref path_re) = rule.path_filter {
         if !path_re.is_match(path) {
             return;
         }
     }
+
+    let regex_re = match &rule.regex {
+        Some(re) => match re.get() {
+            Some(regex) => regex,
+            None => return,
+        },
+        None => return,
+    };
 
     let mut line_cursor = LineCursor::new(content);
     let mut allow_marker_cache: Option<(usize, usize, bool)> = None;

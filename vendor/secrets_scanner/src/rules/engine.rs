@@ -1,9 +1,9 @@
 //! rules/engine.rs — Parse gitleaks-compatible TOML rules into a compiled scan engine.
 //!
-//! The engine deserializes the TOML ruleset into typed structs, compiles all
-//! regexes once at startup, and builds a single Aho-Corasick automaton from
-//! the union of all rule keywords. This enables O(n) scanning of file content
-//! regardless of how many rules exist.
+//! The engine deserializes the TOML ruleset into typed structs and builds a
+//! single Aho-Corasick automaton from the union of all rule keywords. Eager
+//! constructors compile detection regexes immediately; the bundled scanner path
+//! initializes each rule's regex on first use after keyword and path filtering.
 //!
 //! # Architecture
 //!
@@ -14,6 +14,8 @@
 //!                                          └── Vec<CompiledRule> (regex + metadata)
 //! ```
 
+use std::sync::OnceLock;
+
 use aho_corasick::AhoCorasick;
 use regex::Regex;
 
@@ -22,7 +24,7 @@ pub use crate::rules::allowlist::CompiledAllowlist;
 #[path = "engine_builder.rs"]
 mod builder;
 
-/// A compiled rule ready for scanning. All regexes are pre-compiled.
+/// A rule ready for scanning, with a detection regex compiled either eagerly or on first use.
 #[derive(Debug)]
 pub struct CompiledRule {
     /// Unique rule ID from the TOML config.
@@ -31,8 +33,8 @@ pub struct CompiledRule {
     /// Human-readable description.
     pub description: String,
 
-    /// Compiled detection regex.
-    pub regex: Option<regex::bytes::Regex>,
+    /// Detection regex, initialized on first use for lazy engines.
+    pub regex: Option<LazyRegex>,
 
     /// Minimum entropy threshold. `None` disables entropy gating for this rule.
     pub entropy_threshold: Option<f64>,
@@ -48,6 +50,57 @@ pub struct CompiledRule {
 
     /// Optional capture group index for the secret.
     pub secret_group: Option<usize>,
+}
+
+/// Detection regex that can be compiled once on demand.
+#[derive(Debug)]
+pub struct LazyRegex {
+    rule_id: String,
+    pattern: String,
+    compiled: OnceLock<Option<regex::bytes::Regex>>,
+}
+
+impl LazyRegex {
+    pub(super) fn new(rule_id: &str, pattern: &str) -> Self {
+        Self {
+            rule_id: rule_id.to_owned(),
+            pattern: pattern.to_owned(),
+            compiled: OnceLock::new(),
+        }
+    }
+
+    pub(super) fn with_compiled(rule_id: &str, pattern: &str, regex: regex::bytes::Regex) -> Self {
+        let compiled = OnceLock::new();
+        let _ = compiled.set(Some(regex));
+        Self {
+            rule_id: rule_id.to_owned(),
+            pattern: pattern.to_owned(),
+            compiled,
+        }
+    }
+
+    /// Get the compiled detection regex, compiling and caching it on first use.
+    pub fn get(&self) -> Option<&regex::bytes::Regex> {
+        self.compiled
+            .get_or_init(
+                || match crate::rules::validation::compile_bytes_regex(&self.pattern) {
+                    Ok(regex) => Some(regex),
+                    Err(error) => {
+                        log::warn!(
+                            "[engine] Skipping rule '{}' — invalid regex: {error}",
+                            self.rule_id
+                        );
+                        None
+                    }
+                },
+            )
+            .as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_compiled(&self) -> bool {
+        self.compiled.get().is_some()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -135,7 +188,14 @@ impl RuleEngine {
     pub fn from_toml_reporting(
         toml_str: &str,
     ) -> Result<(Self, Vec<String>), crate::error::ScannerError> {
-        builder::build_from_toml(toml_str)
+        builder::build_from_toml(toml_str, false)
+    }
+
+    /// Build an engine that compiles detection regexes only after keyword and
+    /// path filters select a rule. The caller must use rules already validated
+    /// at build or load time.
+    pub(crate) fn from_toml_lazy(toml_str: &str) -> Result<Self, crate::error::ScannerError> {
+        Ok(builder::build_from_toml(toml_str, true)?.0)
     }
 
     /// Returns a reference to the Aho-Corasick automaton.

@@ -14,6 +14,10 @@ jobs:
           persist-credentials: false
       - run: cargo build --release --locked
       - run: cargo test --locked
+      - name: Test vendored scanner engine
+        run: |
+          CARGO_TARGET_DIR=target/vendor-secrets-scanner-tests \
+            cargo test --manifest-path vendor/secrets_scanner/Cargo.toml --locked --lib
       - run: python3 tests/test_iam.py
       - run: python3 vendor/secrets_scanner/scripts/validate_kingfisher_sanitization.py
       - run: python3 tests/test_bench_gate.py

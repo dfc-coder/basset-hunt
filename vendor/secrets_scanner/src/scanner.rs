@@ -80,12 +80,12 @@ impl Scanner {
     /// 3. Bundled default (compiled into binary)
     pub fn new() -> Result<Self, ScannerError> {
         let toml_str = crate::rules::load_rules_for_scanner()?;
-        Ok(Self::from_engine(RuleEngine::from_toml(&toml_str)?))
+        Ok(Self::from_engine(RuleEngine::from_toml_lazy(&toml_str)?))
     }
 
     /// Create a scanner from the bundled (compiled-in) ruleset only.
     pub fn from_bundled() -> Result<Self, ScannerError> {
-        Ok(Self::from_engine(RuleEngine::from_toml(
+        Ok(Self::from_engine(RuleEngine::from_toml_lazy(
             crate::rules::BUNDLED_RULES,
         )?))
     }
