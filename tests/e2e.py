@@ -87,6 +87,21 @@ def main() -> None:
         assert TOKEN not in baseline_text
         assert hashlib.sha256(TOKEN.encode()).hexdigest() not in baseline_text
         assert digest not in baseline_text
+        applied = subprocess.run(
+            [BIN, "stdin", "--baseline", str(baseline)], input=sample,
+            text=True, capture_output=True, env=ENV,
+        )
+        assert applied.returncode == 0 and not applied.stdout
+        assert json.loads(applied.stderr.splitlines()[-1])["baselined"] > 0
+        scan("stdin", "--name", "new.txt", "--baseline", str(baseline), data=sample, code=1)
+        invalid_baseline = root / "invalid-baseline.json"
+        invalid_baseline.write_text('{"version":1,"entries":[{"rule":"private-key"}]}')
+        invalid = subprocess.run(
+            [BIN, "stdin", "--baseline", str(invalid_baseline)], input=sample,
+            text=True, capture_output=True, env=ENV,
+        )
+        assert invalid.returncode == 2 and not invalid.stdout
+        assert "baseline" in invalid.stderr.lower()
         if os.name != "nt":
             protected = root / "protected.txt"
             protected.write_text("preserve this file")
@@ -100,6 +115,18 @@ def main() -> None:
         scan("stdin", "--write-baseline", str(incomplete_baseline), "--max-bytes", "5",
              data="abcdef", code=2)
         assert not incomplete_baseline.exists()
+        embedded_dir = root / "embedded-baseline"
+        embedded_dir.mkdir()
+        embedded_secret = embedded_dir / "secret.env"
+        embedded_secret.write_text(sample)
+        embedded_baseline = embedded_dir / "baseline.json"
+        generated = subprocess.run(
+            [BIN, "fs", str(embedded_secret), "--write-baseline", str(embedded_baseline)],
+            text=True, capture_output=True, env=ENV,
+        )
+        assert generated.returncode == 0
+        scan("fs", str(embedded_dir), code=1)
+        scan("fs", str(embedded_secret), "--baseline", str(embedded_baseline))
         repo = root / "repo"
         repo.mkdir()
         git(repo, "init", "-q", "-b", "main")

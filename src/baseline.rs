@@ -1,27 +1,94 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufReader, Write};
 use std::path::Path;
 
-use anyhow::{Context, Result};
-use serde::Serialize;
+use anyhow::{Context, Result, ensure};
+use serde::{Deserialize, Serialize};
+
+const MAX_BASELINE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_BASELINE_ENTRIES: usize = 100_000;
 
 #[derive(Default)]
 pub(crate) struct Writer {
     entries: BTreeSet<Entry>,
 }
 
-#[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
 struct Entry {
     rule: String,
     location_fingerprint: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Document {
     version: u8,
     entries: Vec<Entry>,
+}
+
+pub(crate) struct Filter {
+    entries: BTreeSet<Entry>,
+}
+
+impl Filter {
+    pub(crate) fn load(path: &Path) -> Result<Self> {
+        let file =
+            File::open(path).with_context(|| format!("opening baseline {}", path.display()))?;
+        ensure!(
+            file.metadata()?.len() <= MAX_BASELINE_BYTES,
+            "baseline exceeds 32 MiB"
+        );
+        let document: Document =
+            serde_json::from_reader(BufReader::new(file)).context("parsing baseline JSON")?;
+        ensure!(document.version == 1, "unsupported baseline version");
+        ensure!(
+            document.entries.len() <= MAX_BASELINE_ENTRIES,
+            "baseline has too many entries"
+        );
+        for entry in &document.entries {
+            ensure!(
+                !entry.rule.is_empty()
+                    && entry.rule.len() <= 256
+                    && entry
+                        .rule
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)),
+                "invalid rule identifier in baseline"
+            );
+            let fingerprint = entry
+                .location_fingerprint
+                .strip_prefix("sha256:")
+                .context("invalid location fingerprint in baseline")?;
+            ensure!(
+                fingerprint.len() == 64
+                    && fingerprint
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "invalid location fingerprint in baseline"
+            );
+        }
+        let count = document.entries.len();
+        let entries: BTreeSet<_> = document.entries.into_iter().collect();
+        ensure!(entries.len() == count, "duplicate entry in baseline");
+        Ok(Self { entries })
+    }
+
+    pub(crate) fn contains(
+        &self,
+        rule: &str,
+        path: &str,
+        line: usize,
+        column: usize,
+    ) -> Result<bool> {
+        let entry = Entry {
+            rule: rule.to_owned(),
+            location_fingerprint: super::sarif::location_fingerprint(rule, path, line, column)?,
+        };
+        Ok(self.entries.contains(&entry))
+    }
 }
 
 impl Writer {
