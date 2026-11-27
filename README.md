@@ -36,6 +36,27 @@ Stdout carries one JSON object per finding. Stderr carries coverage diagnostics.
 | 1 | One or more findings matched the filter |
 | 2 | Input, configuration or coverage error. Earlier output can be partial |
 
+### Accepting reviewed historical findings with a baseline
+
+A baseline accepts only findings whose detector and location fingerprint match an entry. Generate one after reviewing the existing findings:
+
+```bash
+basset git ./service --write-baseline /secure/service-baseline.json
+```
+
+The command writes versioned JSON containing rule IDs and SHA-256 fingerprints of rule/path/line/column, never the detected value or a hash of it. It overwrites the requested output path atomically. An incomplete scan exits 2 and does not write a partial baseline. Review and protect the baseline as owner-managed policy; do not treat it as a general ignore list.
+
+Pass the file explicitly to apply it. For example, a pull-request range scan can use a reviewed baseline generated from the same repository:
+
+```bash
+basset git-range ./service --base origin/main --head HEAD \\
+  --baseline /secure/service-baseline.json
+```
+
+Matched entries are omitted and counted as `baselined` in the stderr summary. New findings still appear and produce exit 1; an unreadable or invalid baseline produces exit 2 before scanning. A baseline committed inside the scanned repository is not applied automatically—only the path passed with `--baseline` is used.
+
+Fingerprints are location-based, not value-based. Moving a finding to a different path or line makes it new; replacing a value at the exact same detector/path/line/column can still match the existing entry. Review baseline changes carefully, and regenerate it only from findings that have been explicitly accepted.
+
 Each raw document is capped at 8 MiB by default. Set `--max-bytes` to change it (maximum 256 MiB). Export records stream independently; raw stdin is one bounded document. Oversized documents and detector truncation mark the run incomplete. Directory scans include hidden files and inspect regular files only, skipping symlinks and .git entries. Archives and model weights are not recursively decoded. Use a stable local snapshot when scanning a concurrently changing directory.
 
 ## Inventory-backed verification
