@@ -86,7 +86,7 @@ keywords = ["b"]
 "#;
     let res = validate_rules_toml(duplicate);
     assert!(res.is_err());
-    assert_eq!(res.unwrap_err()[0], "Duplicate rule ID found: 'rule-1'");
+    assert_eq!(res.unwrap_err()[0], "Duplicate rule ID found: \"rule-1\"");
 }
 
 #[test]
@@ -179,7 +179,7 @@ keywords = ["good"]
         errors[0].contains("Global allowlist path pattern at index 0 is invalid")
             || errors[0]
                 .contains("Global allowlist at index 0 regex pattern at index 0 is invalid")
-            || errors[0].contains("Global allowlist 'legacy-global-allowlist'")
+            || errors[0].contains("Global allowlist \"legacy-global-allowlist\"")
             || errors[0].contains("is invalid")
     );
 }
@@ -232,7 +232,7 @@ keywords = ["good"]
     let res = validate_rules_toml(bad_regex);
     assert!(res.is_err());
     assert!(res.unwrap_err()[0]
-        .contains("Global allowlist 'bad-al' regex pattern at index 0 is invalid"));
+        .contains("Global allowlist \"bad-al\" regex pattern at index 0 is invalid"));
 }
 
 #[test]
@@ -283,6 +283,36 @@ keywords = ["r"]
         errors[0].contains("regex") && errors[0].contains("path"),
         "inert rule should be reported clearly"
     );
+}
+
+#[test]
+fn invalid_regex_validation_does_not_echo_pattern_text() {
+    let toml = r#"
+[[rules]]
+id = "sensitive-pattern-rule"
+regex = '[sensitive-pattern-marker'
+keywords = ["sensitive_"]
+"#;
+    let errors = validate_rules_toml(toml).expect_err("invalid regex must fail validation");
+    let message = errors.join("\n");
+    assert!(message.contains("sensitive-pattern-rule"));
+    assert!(message.contains("invalid detection regex"));
+    assert!(!message.contains("sensitive-pattern-marker"));
+}
+
+#[test]
+fn validates_custom_secret_group_bounds() {
+    let toml = r#"
+[[rules]]
+id = "invalid-secret-group"
+regex = 'token_([A-Z0-9]{8})'
+secretGroup = 2
+keywords = ["token_"]
+"#;
+    let errors = validate_rules_toml(toml).expect_err("out-of-range capture group must fail");
+    assert!(errors
+        .iter()
+        .any(|error| { error.contains("invalid-secret-group") && error.contains("secret_group") }));
 }
 
 #[test]

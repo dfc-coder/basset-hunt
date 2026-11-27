@@ -24,8 +24,11 @@
 //! The scanner owns a compiled `RuleEngine` and a `ScanConfig`.
 //! It is `Send + Sync` and safe to share across threads.
 
+use std::collections::BTreeSet;
+
 use crate::error::{ProxyError, ScannerError};
 use crate::rules::engine::RuleEngine;
+use crate::rules::merge::{merge_sources, MergeSource};
 
 mod coverage;
 mod matching;
@@ -90,6 +93,54 @@ impl Scanner {
         )?))
     }
 
+    /// Add validated TOML rule entries to the bundled catalog without eagerly
+    /// compiling the bundled detection regexes. Custom global allowlists are
+    /// rejected so an additive rules file cannot suppress bundled findings.
+    pub fn from_bundled_with_rules(custom_toml: &str) -> Result<Self, ScannerError> {
+        if let Err(errors) = crate::rules::validation::validate_rules_toml(custom_toml) {
+            return Err(ScannerError::InvalidRules(errors));
+        }
+        let custom_config = toml::from_str::<crate::rules::validation::RulesetConfig>(custom_toml)
+            .map_err(|_| ScannerError::InvalidRules(vec!["TOML deserialization failed".into()]))?;
+        if custom_config.allowlist.is_some() || !custom_config.allowlists.is_empty() {
+            return Err(ScannerError::InvalidRules(vec![
+                "custom global allowlists are not allowed in an additive rules file".into(),
+            ]));
+        }
+
+        let (merged, report) = merge_sources(vec![
+            MergeSource {
+                name: "custom".into(),
+                priority: 1,
+                toml: custom_toml.to_owned(),
+            },
+            MergeSource {
+                name: "bundled".into(),
+                priority: 0,
+                toml: crate::rules::BUNDLED_RULES.to_owned(),
+            },
+        ])
+        .map_err(|_| {
+            ScannerError::InvalidRules(vec![
+                "could not merge custom rules with the bundled catalog".into(),
+            ])
+        })?;
+
+        let duplicate_ids = report
+            .id_collisions
+            .iter()
+            .map(|collision| collision.dropped_id.as_str())
+            .collect::<BTreeSet<_>>();
+        if !duplicate_ids.is_empty() {
+            return Err(ScannerError::InvalidRules(vec![format!(
+                "duplicate custom rule ID(s): {:?}",
+                duplicate_ids.into_iter().collect::<Vec<_>>()
+            )]));
+        }
+
+        Ok(Self::from_engine(RuleEngine::from_toml_lazy(&merged)?))
+    }
+
     /// Create a scanner from a specific TOML file path.
     pub fn from_file(path: &str) -> Result<Self, ScannerError> {
         let toml_str = std::fs::read_to_string(path)?;
@@ -98,7 +149,7 @@ impl Scanner {
 
     /// Create a scanner from a TOML string.
     ///
-    /// Strict gate for explicit `--rules`/`from_file` rulesets: it fails loudly
+    /// Strict gate for explicit `from_toml`/`from_file` rulesets: it fails loudly
     /// (rather than silently scanning with a reduced rule set) if the ruleset has
     /// any uncompilable regex, empty ID, or duplicate ID. `new`/`from_bundled`
     /// take the lenient [`RuleEngine::from_toml`] path because their

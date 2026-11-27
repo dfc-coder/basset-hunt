@@ -629,3 +629,34 @@ keywords = ["ghp_"]
         assert!(context.contains("[REDACTED_SECRET]"));
     }
 }
+
+#[test]
+fn bundled_scanner_adds_custom_rules_with_lazy_compilation() {
+    let custom = r#"
+[[rules]]
+id = "internal-token"
+regex = 'internal_[A-Z0-9]{16}'
+keywords = ["internal_"]
+"#;
+    let bundled_count = Scanner::from_bundled()
+        .expect("bundled scanner")
+        .engine()
+        .rule_count();
+    let scanner = Scanner::from_bundled_with_rules(custom).expect("valid custom rules");
+    assert_eq!(scanner.engine().rule_count(), bundled_count + 1);
+
+    let rule = scanner
+        .engine()
+        .rules()
+        .into_iter()
+        .find(|rule| rule.id == "internal-token")
+        .expect("custom rule is included");
+    assert!(!rule.regex.as_ref().expect("custom regex").is_compiled());
+
+    let token = format!("internal_{}", "A".repeat(16));
+    let findings = scanner.scan_content("internal.env", &format!("TOKEN={token}"));
+    assert!(findings
+        .iter()
+        .any(|finding| finding.rule_id == "internal-token"));
+    assert!(rule.regex.as_ref().expect("custom regex").is_compiled());
+}

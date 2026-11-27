@@ -34,7 +34,7 @@ use std::collections::HashSet;
 pub fn validate_rules_toml(toml_str: &str) -> Result<(), Vec<String>> {
     let config: RulesetConfig = match toml::from_str(toml_str) {
         Ok(cfg) => cfg,
-        Err(e) => return Err(vec![format!("TOML deserialization failed: {}", e)]),
+        Err(_) => return Err(vec!["TOML deserialization failed".into()]),
     };
 
     let mut errors = Vec::new();
@@ -45,14 +45,14 @@ pub fn validate_rules_toml(toml_str: &str) -> Result<(), Vec<String>> {
         let rule_label = if rule.id.trim().is_empty() {
             format!("rule at index {}", idx)
         } else {
-            format!("rule '{}'", rule.id)
+            format!("rule {:?}", rule.id)
         };
 
         // Check ID uniqueness and presence
         if rule.id.trim().is_empty() {
             errors.push(format!("Rule at index {} has an empty ID", idx));
         } else if !seen_ids.insert(rule.id.clone()) {
-            errors.push(format!("Duplicate rule ID found: '{}'", rule.id));
+            errors.push(format!("Duplicate rule ID found: {:?}", rule.id));
         }
 
         if rule.regex.is_none() && rule.path.is_none() {
@@ -74,31 +74,37 @@ pub fn validate_rules_toml(toml_str: &str) -> Result<(), Vec<String>> {
         // Detection regexes run on raw bytes at scan time, so validation must
         // use the same regex engine and reject anything runtime would skip.
         if let Some(ref regex_str) = rule.regex {
-            if let Err(e) = compile_bytes_regex(regex_str) {
-                errors.push(format!(
-                    "{} has invalid detection regex '{}': {}",
-                    rule_label, regex_str, e
-                ));
+            match compile_bytes_regex(regex_str) {
+                Ok(regex) => {
+                    if let Some(group) = rule.secret_group {
+                        if group >= regex.captures_len() {
+                            errors.push(format!(
+                                "{} has secret_group {} but its regex has only {} capture group(s)",
+                                rule_label,
+                                group,
+                                regex.captures_len()
+                            ));
+                        }
+                    }
+                }
+                Err(_) => errors.push(format!("{} has invalid detection regex", rule_label)),
             }
         }
 
         // Validate path filter regex
         if let Some(ref path_str) = rule.path {
-            if let Err(e) = compile_regex(path_str) {
-                errors.push(format!(
-                    "{} has invalid path regex '{}': {}",
-                    rule_label, path_str, e
-                ));
+            if compile_regex(path_str).is_err() {
+                errors.push(format!("{} has invalid path regex", rule_label));
             }
         }
 
         // Validate allowlists
         for (al_idx, allowlist) in rule.allowlists.iter().enumerate() {
             for (reg_idx, regex_str) in allowlist.regexes.iter().enumerate() {
-                if let Err(e) = compile_bytes_regex(regex_str) {
+                if compile_bytes_regex(regex_str).is_err() {
                     errors.push(format!(
-                        "{} allowlist at index {} has invalid regex '{}' (pattern index {}): {}",
-                        rule_label, al_idx, regex_str, reg_idx, e
+                        "{} allowlist at index {} has invalid regex (pattern index {})",
+                        rule_label, al_idx, reg_idx
                     ));
                 }
             }
@@ -106,10 +112,10 @@ pub fn validate_rules_toml(toml_str: &str) -> Result<(), Vec<String>> {
             // validate them here too (otherwise an invalid path silently drops
             // the allowlist's file-suppression at runtime).
             for (path_idx, path_str) in allowlist.paths.iter().enumerate() {
-                if let Err(e) = compile_regex(path_str) {
+                if compile_regex(path_str).is_err() {
                     errors.push(format!(
-                        "{} allowlist at index {} has invalid path regex '{}' (pattern index {}): {}",
-                        rule_label, al_idx, path_str, path_idx, e
+                        "{} allowlist at index {} has invalid path regex (pattern index {})",
+                        rule_label, al_idx, path_idx
                     ));
                 }
             }
@@ -127,24 +133,24 @@ pub fn validate_rules_toml(toml_str: &str) -> Result<(), Vec<String>> {
 
     for (al_idx, global_al) in all_global_allowlists.iter().enumerate() {
         let al_label = if let Some(ref id) = global_al.id {
-            format!("Global allowlist '{}'", id)
+            format!("Global allowlist {:?}", id)
         } else {
             format!("Global allowlist at index {}", al_idx)
         };
 
         for (idx, path_str) in global_al.paths.iter().enumerate() {
-            if let Err(e) = compile_regex(path_str) {
+            if compile_regex(path_str).is_err() {
                 errors.push(format!(
-                    "{} path pattern at index {} is invalid '{}': {}",
-                    al_label, idx, path_str, e
+                    "{} path pattern at index {} is invalid",
+                    al_label, idx
                 ));
             }
         }
         for (idx, regex_str) in global_al.regexes.iter().enumerate() {
-            if let Err(e) = compile_bytes_regex(regex_str) {
+            if compile_bytes_regex(regex_str).is_err() {
                 errors.push(format!(
-                    "{} regex pattern at index {} is invalid '{}': {}",
-                    al_label, idx, regex_str, e
+                    "{} regex pattern at index {} is invalid",
+                    al_label, idx
                 ));
             }
         }
