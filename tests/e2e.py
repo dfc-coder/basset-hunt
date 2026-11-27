@@ -28,7 +28,24 @@ def git(repo: Path, *args: str) -> str:
     return subprocess.check_output(["git", "-C", repo, *args], text=True).strip()
 
 
+def startup_budget() -> None:
+    started = time.perf_counter()
+    run = subprocess.run(
+        [BIN, "stdin"], input="ok", text=True, capture_output=True, env=ENV, timeout=2
+    )
+    elapsed = time.perf_counter() - started
+    assert run.returncode == 0 and not run.stdout, run.stderr
+    assert elapsed < 0.3, f"2-byte stdin scan took {elapsed:.3f}s"
+
+    if sys.platform == "linux":
+        import resource
+
+        rss_mib = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024
+        assert rss_mib < 100, f"2-byte stdin scan used {rss_mib:.1f} MiB RSS"
+
+
 def main() -> None:
+    startup_budget()
     assert scan("rules")[0]["compiled_rules"] >= 800
     catalog = scan("rules", "--list")
     assert len({r["id"] for r in catalog}) >= 800
