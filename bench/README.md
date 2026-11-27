@@ -74,6 +74,25 @@ Informe del job `benchmark` de la ejecución [45943494163](https://github.com/df
 
 Basset no imprimió ningún valor secreto. Gitleaks (con `--redact`) tampoco. TruffleHog incluyó valores en su salida JSON; el runner no publica sus salidas sin procesar.
 
+## Perfilado de compilación de reglas
+
+Perfil local de la compilación de cada regex de las reglas empaquetadas (987 reglas con patrón), usando `regex` 1.13.2, `RegexBuilder` con el mismo límite de 100 MiB que `secrets_scanner`, compilación `--release` y un asignador que registra el pico de bytes vivos por regla. Se midió en tres pasadas: el total de compilación fue 3,072–3,133 s; las 987 regex compilaron correctamente. Los tiempos absolutos son de esta máquina (Rust 1.99.0, Linux x86_64), no del runner de CI.
+
+| Regla | Compilación | Pico de asignaciones de esa regex |
+|---|---:|---:|
+| `pypi-upload-token` | 364 ms | 105,8 MB |
+| `vault-batch-token` | 87 ms | 25,9 MB |
+| `generic-api-key` | 69 ms | 27,0 MB |
+| `okta-access-token` | 54 ms | 13,0 MB |
+| `sumologic-access-id` | 43 ms | 13,4 MB |
+| `cisco-meraki-api-key` | 40 ms | 13,4 MB |
+| `privateai-api-token` | 38 ms | 13,4 MB |
+| `cohere-api-token` | 35 ms | 13,4 MB |
+| `vault-service-token` | 34 ms | 13,3 MB |
+| `kingfisher.anthropic.1` | 27 ms | 13,6 MB |
+
+Los tres mayores outliers de memoria/tiempo son `pypi-upload-token`, `vault-batch-token` y `generic-api-key`; después aparece un grupo de reglas de unos 13 MB cada una. El patrón de PyPI admite hasta 1000 caracteres (`[\\w-]{50,1000}`), y el `size_limit` de 100 MiB no impide que compile con un pico ligeramente mayor. Los picos por regla son mediciones aisladas y **no se suman como RSS del proceso**; la cifra acumulada de asignaciones independientes fue 1.198 GB. La medición del proceso Basset completo en CI fue 670 MB RSS. La evidencia apunta a que la compilación eager de regex domina el arranque y justifica probar compilación diferida; no demuestra por sí sola qué optimización dará el mejor resultado.
+
 ### Reproducibilidad y limitaciones
 
 Los casos de RSA son claves válidas y los casos AWS contienen access key ID y secret access key sintéticos. Los valores usan aleatoriedad determinista con semilla; no son credenciales reales. Las métricas funcionales son reproducibles; tiempo y memoria dependen del runner. Esta línea base corresponde al corpus de la semilla 1 y versiones fijadas indicadas arriba.
