@@ -284,3 +284,24 @@ keywords = ["r"]
         "inert rule should be reported clearly"
     );
 }
+
+#[test]
+fn bundled_catalog_regexes_validate_and_invalid_injection_fails() {
+    let bundled = crate::rules::BUNDLED_RULES;
+    assert!(
+        validate_rules_toml(bundled).is_ok(),
+        "the complete bundled catalog must compile"
+    );
+
+    let injected = format!(
+        "{bundled}\n[[rules]]\nid = 'basset-test-invalid-catalog-regex-guard'\nregex = '['\nkeywords = ['invalid-test-keyword']\n"
+    );
+    let errors = validate_rules_toml(&injected).expect_err("injected invalid regex must fail");
+    assert!(
+        errors.iter().any(|error| {
+            error.contains("basset-test-invalid-catalog-regex-guard")
+                && error.contains("invalid detection regex")
+        }),
+        "validation should identify the injected invalid regex: {errors:?}"
+    );
+}
