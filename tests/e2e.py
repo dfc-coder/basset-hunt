@@ -13,6 +13,9 @@ import time
 
 BIN = Path(sys.argv[1]).resolve()
 TOKEN = "gh" + "p_" + "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36))
+INTERNAL_TOKEN = "acme_internal_" + "".join(
+    secrets.choice(string.ascii_uppercase + string.digits) for _ in range(24)
+)
 KEY = secrets.token_bytes(32)
 ENV = {**os.environ, "BASSET_HMAC_KEY": KEY.hex()}
 
@@ -20,6 +23,7 @@ ENV = {**os.environ, "BASSET_HMAC_KEY": KEY.hex()}
 def scan(*args: str, data: str = "", code: int = 0) -> list[dict]:
     run = subprocess.run([BIN, *args], input=data, text=True, capture_output=True, env=ENV)
     assert TOKEN not in run.stdout + run.stderr, "source value exposed in output"
+    assert INTERNAL_TOKEN not in run.stdout + run.stderr, "custom source value exposed in output"
     assert run.returncode == code, (args, run.returncode, run.stderr)
     return [json.loads(line) for line in run.stdout.splitlines()]
 
@@ -36,6 +40,21 @@ def startup_budget() -> None:
     elapsed = time.perf_counter() - started
     assert run.returncode == 0 and not run.stdout, run.stderr
     assert elapsed < 0.3, f"2-byte stdin scan took {elapsed:.3f}s"
+
+    with tempfile.TemporaryDirectory() as temp:
+        rules = Path(temp) / "startup-rules.toml"
+        rules.write_text(
+            "[[rules]]\nid = 'startup-custom-rule'\nregex = 'startup_[A-Z0-9]{8}'\n"
+            "keywords = ['startup_']\n"
+        )
+        started = time.perf_counter()
+        custom = subprocess.run(
+            [BIN, "stdin", "--rules", str(rules)], input="ok", text=True,
+            capture_output=True, env=ENV, timeout=2,
+        )
+        custom_elapsed = time.perf_counter() - started
+        assert custom.returncode == 0 and not custom.stdout, custom.stderr
+        assert custom_elapsed < 0.3, f"2-byte stdin scan with --rules took {custom_elapsed:.3f}s"
 
     if sys.platform == "linux":
         import resource
@@ -69,6 +88,72 @@ def main() -> None:
                for r in candidates)
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
+        custom_rules = root / "custom-rules.toml"
+        custom_rules.write_text(
+            "[[rules]]\nid = 'org-internal-token'\ndescription = 'Internal token'\n"
+            "regex = 'acme_internal_[A-Z0-9]{24}'\nkeywords = ['acme_internal_']\n"
+        )
+        custom_findings = scan(
+            "stdin", "--rules", str(custom_rules),
+            data=f"INTERNAL_TOKEN={INTERNAL_TOKEN}\n", code=1,
+        )
+        assert any(row["detector"] == "org-internal-token" for row in custom_findings)
+
+        invalid_rules = root / "invalid-rules.toml"
+        invalid_rules.write_text(
+            "[[rules]]\nid = 'invalid-custom-rule'\nregex = '[private-pattern-marker'\n"
+            "keywords = ['bad_']\n"
+        )
+        invalid_custom = subprocess.run(
+            [BIN, "stdin", "--rules", str(invalid_rules)], input=f"GITHUB_TOKEN={TOKEN}\n",
+            text=True, capture_output=True, env=ENV,
+        )
+        assert invalid_custom.returncode == 2 and not invalid_custom.stdout
+        assert "invalid-custom-rule" in invalid_custom.stderr
+        assert "private-pattern-marker" not in invalid_custom.stderr
+        assert TOKEN not in invalid_custom.stdout + invalid_custom.stderr
+
+        empty_id_rules = root / "empty-id-rules.toml"
+        empty_id_rules.write_text(
+            "[[rules]]\nid = ''\nregex = 'empty_[A-Z0-9]{8}'\nkeywords = ['empty_']\n"
+        )
+        empty_id = subprocess.run(
+            [BIN, "stdin", "--rules", str(empty_id_rules)], input="ordinary text\n",
+            text=True, capture_output=True, env=ENV,
+        )
+        assert empty_id.returncode == 2 and not empty_id.stdout
+        assert "empty ID" in empty_id.stderr
+
+        duplicate_rules = root / "duplicate-rules.toml"
+        duplicate_rules.write_text(
+            "[[rules]]\nid = 'generic-api-key'\nregex = 'acme_internal_[A-Z0-9]{24}'\n"
+            "keywords = ['acme_internal_']\n"
+        )
+        duplicate = subprocess.run(
+            [BIN, "stdin", "--rules", str(duplicate_rules)], input="ordinary text\n",
+            text=True, capture_output=True, env=ENV,
+        )
+        assert duplicate.returncode == 2 and not duplicate.stdout
+        assert "generic-api-key" in duplicate.stderr and "duplicate" in duplicate.stderr
+
+        allowlist_rules = root / "global-allowlist-rules.toml"
+        allowlist_rules.write_text("[allowlist]\nregexes = ['acme_internal_']\n")
+        allowlist = subprocess.run(
+            [BIN, "stdin", "--rules", str(allowlist_rules)], input="ordinary text\n",
+            text=True, capture_output=True, env=ENV,
+        )
+        assert allowlist.returncode == 2 and not allowlist.stdout
+        assert "global allowlists" in allowlist.stderr
+
+        oversized_rules = root / "oversized-rules.toml"
+        oversized_rules.write_bytes(b" " * (8 * 1024 * 1024 + 1))
+        oversized = subprocess.run(
+            [BIN, "stdin", "--rules", str(oversized_rules)], input="ordinary text\n",
+            text=True, capture_output=True, env=ENV,
+        )
+        assert oversized.returncode == 2 and not oversized.stdout
+        assert "8 MiB" in oversized.stderr
+
         inv = root / "inventory.json"
         check_time = int(time.time())
         row = dict(fingerprint=digest, state="active", checked_at=check_time,

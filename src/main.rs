@@ -4,9 +4,9 @@ mod git;
 mod inputs;
 mod sarif;
 
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::ops::RangeInclusive;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, ensure};
@@ -35,6 +35,9 @@ struct Cli {
     /// Maximum bytes per document. Oversized inputs cause exit 2.
     #[arg(long, global = true, default_value_t = 8388608, value_parser = clap::value_parser!(u64).range(1..=268435456))]
     max_bytes: u64,
+    /// Add validated detection rules from a TOML file to the bundled catalog.
+    #[arg(long, global = true, value_name = "FILE")]
+    rules: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -174,6 +177,26 @@ impl<W: Write> Audit<W> {
     }
 }
 
+const MAX_RULES_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+fn read_rules_file(path: &Path) -> Result<String> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("checking custom rules file {:?}", path))?;
+    ensure!(metadata.is_file(), "--rules must refer to a regular file");
+    let mut reader = std::fs::File::open(path)
+        .with_context(|| format!("opening custom rules file {:?}", path))?
+        .take(MAX_RULES_FILE_BYTES + 1);
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading custom rules file {:?}", path))?;
+    ensure!(
+        bytes.len() <= MAX_RULES_FILE_BYTES as usize,
+        "custom rules file exceeds 8 MiB"
+    );
+    String::from_utf8(bytes).context("custom rules file must be UTF-8")
+}
+
 fn preflight_failure<T>(error: anyhow::Error, sarif_output: bool) -> Result<T> {
     if sarif_output {
         let mut out = BufWriter::new(io::stdout().lock());
@@ -192,6 +215,9 @@ fn run() -> Result<u8> {
     {
         return preflight_failure(anyhow::anyhow!("baseline options require a scan source"), sarif_output);
     }
+    if cli.rules.is_some() && matches!(cli.command, Source::Fingerprint) {
+        return preflight_failure(anyhow::anyhow!("--rules requires a scan or rules command"), sarif_output);
+    }
     if matches!(cli.command, Source::Fingerprint) {
         let key = evidence::key()?.context("set BASSET_HMAC_KEY to fingerprint a value")?;
         let bytes = inputs::bounded(io::stdin().lock(), cli.max_bytes)?
@@ -204,10 +230,31 @@ fn run() -> Result<u8> {
         Ok(filter) => filter,
         Err(error) => return preflight_failure(error, sarif_output),
     };
-    let engine = match Scanner::from_bundled() {
-        Ok(engine) => engine.with_config(ScanConfig { honor_allow_markers: false, ..ScanConfig::default() }),
-        Err(_) => return preflight_failure(anyhow::anyhow!("could not compile bundled detector rules"), sarif_output),
+    let scanner = match cli.rules.as_deref() {
+        Some(path) => {
+            let custom_rules = match read_rules_file(path) {
+                Ok(rules) => rules,
+                Err(error) => return preflight_failure(error, sarif_output),
+            };
+            match Scanner::from_bundled_with_rules(&custom_rules) {
+                Ok(scanner) => scanner,
+                Err(error) => {
+                    return preflight_failure(
+                        anyhow::Error::new(error).context("invalid custom rules"),
+                        sarif_output,
+                    );
+                }
+            }
+        }
+        None => match Scanner::from_bundled() {
+            Ok(scanner) => scanner,
+            Err(_) => return preflight_failure(anyhow::anyhow!("could not compile bundled detector rules"), sarif_output),
+        },
     };
+    let engine = scanner.with_config(ScanConfig {
+        honor_allow_markers: false,
+        ..ScanConfig::default()
+    });
     let count = engine.engine().rule_count();
     if count < 800 { return preflight_failure(anyhow::anyhow!("catalog contains only {count} compiled rules"), sarif_output); }
     if let Source::Rules { list } = &cli.command {

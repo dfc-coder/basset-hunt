@@ -28,6 +28,16 @@ The pinned `secrets_scanner` 0.2.3 library supplies the embedded rule catalog, k
 
 Inline comments such as `gitleaks:allow` and `secrets-scanner:allow` never suppress Basset findings in any scan mode. Treat scanned content as untrusted; use the trusted inventory and the normal results filters for triage.
 
+### Adding custom detection rules
+
+Pass `--rules FILE` to add a TOML ruleset to the bundled catalog. The file is limited to 8 MiB; custom regexes, identifiers, capture groups and filters are validated before scanning. Empty or duplicate IDs—including collisions with bundled IDs—fail with exit 2. Invalid-rule diagnostics name the rule but do not echo its regex. The bundled catalog remains lazily compiled, while custom rules are checked before use.
+
+```bash
+basset git ./service --rules /secure/internal-rules.toml
+```
+
+Use the upstream `secrets_scanner` TOML rule format, with one or more `[[rules]]` entries. Global allowlists are rejected because an additive file must not suppress bundled findings; per-rule allowlists affect only their custom detector.
+
 Stdout carries one JSON object per finding. Stderr carries coverage diagnostics. Match text and source lines are excluded. Paths, source names, owner labels and runbook references are included verbatim as JSON strings and should be suitable for the intended report audience. Put tokens and signed URLs in content, never in location or inventory metadata.
 
 | Exit | Meaning |
