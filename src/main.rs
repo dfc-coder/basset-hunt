@@ -75,6 +75,28 @@ pub struct Location<'a> {
     blob: Option<&'a str>,
 }
 
+#[derive(Default, Serialize)]
+pub(crate) struct FindingMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) encoding: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) archive_entry: Option<String>,
+}
+
+#[derive(Serialize)]
+struct FindingReport<'a> {
+    location: &'a Location<'a>,
+    line: usize,
+    column: usize,
+    detector: &'a str,
+    classification: &'a str,
+    status: &'a str,
+    fingerprint: Option<&'a str>,
+    inventory: Option<&'a evidence::Record>,
+    #[serde(flatten)]
+    metadata: &'a FindingMetadata,
+}
+
 pub struct Audit<W> {
     engine: Scanner,
     key: Option<evidence::Key>,
@@ -150,18 +172,34 @@ impl<W: Write> Audit<W> {
             let (status, record) = self.inventory.lookup(digest.as_deref(), self.now, self.max_age);
             if self.verified_only && status != "verified" { continue; }
             // Build a fresh report: the engine finding also contains source context.
+            let metadata = FindingMetadata::default();
             if let Some(sarif) = &mut self.sarif {
                 let was_truncated = sarif.is_truncated();
-                let accepted = sarif.add(&hit.rule_id, &hit.rule_description, loc.path,
-                    hit.line, hit.col_utf16, loc.revision)?;
+                let accepted = sarif.add(
+                    &hit.rule_id,
+                    &hit.rule_description,
+                    sarif::FindingLocation {
+                        path: loc.path,
+                        line: hit.line,
+                        column: hit.col_utf16,
+                        commit: loc.revision,
+                    },
+                    &metadata,
+                )?;
                 if !accepted && !was_truncated { self.incomplete += 1; }
                 self.emitted += u64::from(accepted);
             } else {
-                let report = json!({
-                    "location": loc, "line": hit.line, "column": hit.col, "detector": hit.rule_id,
-                    "classification": hit.rule_description, "status": status, "fingerprint": digest,
-                    "inventory": record,
-                });
+                let report = serde_json::to_value(FindingReport {
+                    location: &loc,
+                    line: hit.line,
+                    column: hit.col,
+                    detector: &hit.rule_id,
+                    classification: &hit.rule_description,
+                    status,
+                    fingerprint: digest.as_deref(),
+                    inventory: record,
+                    metadata: &metadata,
+                })?;
                 serde_json::to_writer(&mut self.out, &report)?;
                 writeln!(self.out)?;
                 self.emitted += 1;
@@ -317,7 +355,7 @@ fn run() -> Result<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::overlaps_added_lines;
+    use super::{FindingMetadata, FindingReport, Location, overlaps_added_lines};
 
     #[test]
     fn range_filter_uses_secret_capture_start_line() {
@@ -325,6 +363,33 @@ mod tests {
         let secret_start = bytes.iter().position(|&byte| byte == b's').unwrap();
         assert!(overlaps_added_lines(bytes, secret_start, b"secret", &[2..=2]));
         assert!(!overlaps_added_lines(bytes, secret_start, b"secret", &[1..=1]));
+    }
+
+    #[test]
+    fn jsonl_report_omits_absent_metadata_and_emits_present_metadata() {
+        let location = Location { source: "stdin", path: "input", revision: None, blob: None };
+        let absent = FindingMetadata::default();
+        let value = serde_json::to_value(FindingReport {
+            location: &location, line: 1, column: 1, detector: "rule", classification: "Rule",
+            status: "unknown", fingerprint: None, inventory: None, metadata: &absent,
+        }).expect("serialize report");
+        assert!(value.get("encoding").is_none());
+        assert!(value.get("archive_entry").is_none());
+        for field in ["location", "line", "column", "detector", "classification", "status", "fingerprint", "inventory"] {
+            assert!(value.get(field).is_some());
+        }
+        assert_eq!(value.as_object().map(|object| object.len()), Some(8));
+
+        let present = FindingMetadata {
+            encoding: Some("base64".to_owned()),
+            archive_entry: Some("archive.zip:entry.txt".to_owned()),
+        };
+        let value = serde_json::to_value(FindingReport {
+            location: &location, line: 1, column: 1, detector: "rule", classification: "Rule",
+            status: "unknown", fingerprint: None, inventory: None, metadata: &present,
+        }).expect("serialize report");
+        assert_eq!(value["encoding"], "base64");
+        assert_eq!(value["archive_entry"], "archive.zip:entry.txt");
     }
 }
 

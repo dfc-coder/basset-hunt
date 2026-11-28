@@ -2,11 +2,19 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use anyhow::Result;
+use crate::FindingMetadata;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
 const MAX_RESULTS: usize = 1_000;
 const SRCROOT: &str = "%SRCROOT%";
+
+pub(crate) struct FindingLocation<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) line: usize,
+    pub(crate) column: usize,
+    pub(crate) commit: Option<&'a str>,
+}
 
 pub(crate) struct Writer {
     rules: BTreeMap<String, String>,
@@ -45,32 +53,39 @@ impl Writer {
         &mut self,
         rule_id: &str,
         description: &str,
-        path: &str,
-        line: usize,
-        column: usize,
-        commit: Option<&str>,
+        location: FindingLocation<'_>,
+        metadata: &FindingMetadata,
     ) -> Result<bool> {
         if self.results.len() >= self.limit {
             self.truncated = true;
             return Ok(false);
         }
 
-        let fingerprint = location_fingerprint(rule_id, path, line, column)?;
+        let fingerprint = location_fingerprint(
+            rule_id, location.path, location.line, location.column,
+        )?;
         self.rules
             .entry(rule_id.to_owned())
             .or_insert_with(|| description.to_owned());
+        let mut properties = json!({ "commit": location.commit });
+        if let Some(encoding) = metadata.encoding.as_deref() {
+            properties["encoding"] = json!(encoding);
+        }
+        if let Some(archive_entry) = metadata.archive_entry.as_deref() {
+            properties["archive_entry"] = json!(archive_entry);
+        }
         self.results.push(json!({
             "ruleId": rule_id,
             "level": "warning",
             "message": { "text": "Potential secret detected." },
             "locations": [{
                 "physicalLocation": {
-                    "artifactLocation": { "uri": uri_path(path, false), "uriBaseId": SRCROOT },
-                    "region": { "startLine": line.max(1), "startColumn": column.max(1) }
+                    "artifactLocation": { "uri": uri_path(location.path, false), "uriBaseId": SRCROOT },
+                    "region": { "startLine": location.line.max(1), "startColumn": location.column.max(1) }
                 }
             }],
             "partialFingerprints": { "primaryLocationLineHash": fingerprint },
-            "properties": { "commit": commit }
+            "properties": properties
         }));
         Ok(true)
     }
@@ -153,7 +168,7 @@ fn file_uri_root(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::Writer;
+    use super::{FindingLocation, Writer};
     use serde_json::Value;
 
     #[test]
@@ -164,10 +179,8 @@ mod tests {
             .add(
                 "private-key",
                 "Private key",
-                "a b/key#1.pem",
-                3,
-                2,
-                Some("abc123"),
+                FindingLocation { path: "a b/key#1.pem", line: 3, column: 2, commit: Some("abc123") },
+                &crate::FindingMetadata::default(),
             )
             .unwrap();
         let mut output = Vec::new();
@@ -184,6 +197,8 @@ mod tests {
         );
         assert_eq!(result["message"]["text"], "Potential secret detected.");
         assert_eq!(result["properties"]["commit"], "abc123");
+        assert!(result["properties"].get("encoding").is_none());
+        assert!(result["properties"].get("archive_entry").is_none());
         assert_eq!(
             run["originalUriBaseIds"]["%SRCROOT%"]["uri"],
             "file:///tmp/basset%20repo/"
@@ -196,10 +211,8 @@ mod tests {
             .add(
                 "private-key",
                 "Private key",
-                "a b/key#1.pem",
-                3,
-                2,
-                Some("different-commit"),
+                FindingLocation { path: "a b/key#1.pem", line: 3, column: 2, commit: Some("different-commit") },
+                &crate::FindingMetadata::default(),
             )
             .unwrap();
         assert_eq!(
@@ -209,10 +222,34 @@ mod tests {
     }
 
     #[test]
+    fn optional_finding_metadata_is_serialized_in_sarif_properties() {
+        let metadata = crate::FindingMetadata {
+            encoding: Some("base64".to_owned()),
+            archive_entry: Some("archive.zip:entry.txt".to_owned()),
+        };
+        let mut writer = Writer::default();
+        writer.add(
+            "rule", "Rule",
+            FindingLocation { path: "input", line: 1, column: 1, commit: None },
+            &metadata,
+        ).expect("add finding");
+        let mut output = Vec::new();
+        writer.write(&mut output, true).expect("write SARIF");
+        let document: Value = serde_json::from_slice(&output).expect("parse SARIF");
+        let properties = &document["runs"][0]["results"][0]["properties"];
+        assert_eq!(properties["encoding"], "base64");
+        assert_eq!(properties["archive_entry"], "archive.zip:entry.txt");
+    }
+
+    #[test]
     fn reaching_result_limit_marks_invocation_incomplete_and_keeps_prior_results() {
         let mut writer = Writer::with_limit(1);
-        assert!(writer.add("rule", "Rule", "a.txt", 1, 1, None).unwrap());
-        assert!(!writer.add("rule", "Rule", "b.txt", 1, 1, None).unwrap());
+        assert!(writer.add("rule", "Rule",
+            FindingLocation { path: "a.txt", line: 1, column: 1, commit: None },
+            &crate::FindingMetadata::default()).unwrap());
+        assert!(!writer.add("rule", "Rule",
+            FindingLocation { path: "b.txt", line: 1, column: 1, commit: None },
+            &crate::FindingMetadata::default()).unwrap());
         assert!(writer.is_truncated());
         let mut output = Vec::new();
         writer.write(&mut output, false).unwrap();
