@@ -83,12 +83,6 @@ impl DecodeBuilder<'_> {
         if end - start < MIN_BASE64_CHARS {
             return true;
         }
-        if self.candidates == self.segment_limit {
-            self.document.truncated = true;
-            return false;
-        }
-        self.candidates += 1;
-
         let remaining = self.byte_limit.saturating_sub(self.decoded_bytes);
         let output_limit = remaining.saturating_add(2);
         let estimate = base64::decoded_len_estimate(end - start);
@@ -116,6 +110,15 @@ impl DecodeBuilder<'_> {
             return false;
         }
 
+        if !looks_like_text(&self.scratch[..decoded_len]) {
+            return true;
+        }
+        if self.candidates == self.segment_limit {
+            self.document.truncated = true;
+            return false;
+        }
+        self.candidates += 1;
+
         if !self.document.segments.is_empty() {
             self.document.bytes.push(SEPARATOR);
         }
@@ -132,6 +135,16 @@ impl DecodeBuilder<'_> {
         self.decoded_bytes += decoded_len;
         true
     }
+}
+
+/// Hashes, fingerprints and identifiers are often valid Base64 but decode to
+/// binary noise; only mostly-printable output can hold a detectable secret.
+fn looks_like_text(bytes: &[u8]) -> bool {
+    let printable = bytes
+        .iter()
+        .filter(|&&byte| matches!(byte, b'\n' | b'\r' | b'\t' | 0x20..=0x7e))
+        .count();
+    printable * 10 >= bytes.len() * 9
 }
 
 fn decode_with_limits(input: &[u8], byte_limit: usize, segment_limit: usize) -> Document {
