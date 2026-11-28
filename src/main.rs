@@ -1,4 +1,5 @@
 mod baseline;
+mod decode;
 mod evidence;
 mod git;
 mod inputs;
@@ -143,26 +144,77 @@ impl<W: Write> Audit<W> {
     }
 
     fn document_selected(&mut self, loc: Location<'_>, bytes: &[u8], added: Option<&[RangeInclusive<usize>]>) -> Result<()> {
-        let scanned = self.engine.scan_bytes_detailed(loc.path, bytes);
         self.documents += 1;
-        if scanned.findings_truncated {
-            self.skip(&loc, "detector finding cap")?;
+        self.process_bytes(&loc, bytes, added, None)?;
+        let decoded = decode::base64(bytes);
+        self.process_bytes(&loc, &decoded.bytes, added, Some(&decoded.segments))?;
+        if decoded.truncated {
+            self.skip(&loc, "encoded content limits")?;
         }
+        Ok(())
+    }
+
+    fn process_bytes(
+        &mut self,
+        loc: &Location<'_>,
+        bytes: &[u8],
+        added: Option<&[RangeInclusive<usize>]>,
+        segments: Option<&[decode::Segment]>,
+    ) -> Result<()> {
+        if segments.is_some_and(|segments| segments.is_empty()) {
+            return Ok(());
+        }
+        let scanned = self.engine.scan_bytes_detailed(loc.path, bytes);
+        if scanned.findings_truncated {
+            self.skip(loc, "detector finding cap")?;
+        }
+        let mut unmapped_decoded_hit = false;
         for hit in scanned.findings {
+            if segments.is_some() && hit.secret_start_offset == hit.secret_end_offset {
+                continue;
+            }
             let raw = bytes.get(hit.secret_start_offset..hit.secret_end_offset)
                 .context("invalid detector offsets")?;
+            let segment = if let Some(segments) = segments {
+                segments.iter().find(|segment| {
+                    hit.secret_start_offset >= segment.decoded_range.start
+                        && hit.secret_end_offset <= segment.decoded_range.end
+                })
+            } else {
+                None
+            };
+            if segments.is_some() && segment.is_none() {
+                unmapped_decoded_hit = true;
+                continue;
+            }
+            let (line, column, column_utf16, encoding) = match segment {
+                Some(segment) => (
+                    segment.line,
+                    segment.column,
+                    segment.column_utf16,
+                    Some("base64"),
+                ),
+                None => (hit.line, hit.col, hit.col_utf16, None),
+            };
             if let Some(added) = added {
-                if !overlaps_added_lines(bytes, hit.secret_start_offset, raw, added) {
+                let included = if let Some(segment) = segment {
+                    added.iter().any(|range| {
+                        *range.start() <= segment.line && *range.end() >= segment.line
+                    })
+                } else {
+                    overlaps_added_lines(bytes, hit.secret_start_offset, raw, added)
+                };
+                if !included {
                     continue;
                 }
             }
             self.candidates += 1;
             if let Some((_, baseline)) = &mut self.baseline_writer {
-                baseline.add(&hit.rule_id, loc.path, hit.line, hit.col)?;
+                baseline.add(&hit.rule_id, loc.path, line, column)?;
                 continue;
             }
             if let Some(baseline) = &self.baseline_filter {
-                if baseline.contains(&hit.rule_id, loc.path, hit.line, hit.col)? {
+                if baseline.contains(&hit.rule_id, loc.path, line, column)? {
                     self.baselined += 1;
                     continue;
                 }
@@ -171,8 +223,10 @@ impl<W: Write> Audit<W> {
                 .map(|key| evidence::fingerprint(key, raw));
             let (status, record) = self.inventory.lookup(digest.as_deref(), self.now, self.max_age);
             if self.verified_only && status != "verified" { continue; }
-            // Build a fresh report: the engine finding also contains source context.
-            let metadata = FindingMetadata::default();
+            let metadata = FindingMetadata {
+                encoding: encoding.map(str::to_owned),
+                archive_entry: None,
+            };
             if let Some(sarif) = &mut self.sarif {
                 let was_truncated = sarif.is_truncated();
                 let accepted = sarif.add(
@@ -180,8 +234,8 @@ impl<W: Write> Audit<W> {
                     &hit.rule_description,
                     sarif::FindingLocation {
                         path: loc.path,
-                        line: hit.line,
-                        column: hit.col_utf16,
+                        line,
+                        column: column_utf16,
                         commit: loc.revision,
                     },
                     &metadata,
@@ -189,10 +243,11 @@ impl<W: Write> Audit<W> {
                 if !accepted && !was_truncated { self.incomplete += 1; }
                 self.emitted += u64::from(accepted);
             } else {
+                // Build a fresh report: the engine finding also contains source context.
                 let report = serde_json::to_value(FindingReport {
-                    location: &loc,
-                    line: hit.line,
-                    column: hit.col,
+                    location: loc,
+                    line,
+                    column,
                     detector: &hit.rule_id,
                     classification: &hit.rule_description,
                     status,
@@ -204,6 +259,9 @@ impl<W: Write> Audit<W> {
                 writeln!(self.out)?;
                 self.emitted += 1;
             }
+        }
+        if unmapped_decoded_hit {
+            self.skip(loc, "decoded finding crosses segment boundary")?;
         }
         Ok(())
     }

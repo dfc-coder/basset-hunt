@@ -1,4 +1,5 @@
 """Run against the compiled CLI. All credential-shaped values are synthetic."""
+import base64
 import hashlib
 import hmac
 import json
@@ -86,6 +87,24 @@ def main() -> None:
     candidates = scan("stdin", data=sample, code=1)
     assert any(r["line"] == 2 and r["fingerprint"] == digest and r["status"] == "unknown"
                for r in candidates)
+    encoded_plain = f"header\nGITHUB_TOKEN={TOKEN}\n".encode()
+    encoded_token = base64.b64encode(encoded_plain).decode()
+    encoded_findings = scan("stdin", data=f"comment\nTOKEN={encoded_token}\n", code=1)
+    assert any(row["line"] == 2 and row["encoding"] == "base64" for row in encoded_findings)
+    url_payload = encoded_plain + b"\xfb"
+    url_token = base64.urlsafe_b64encode(url_payload).decode()
+    url_findings = scan("stdin", data=f"https://example.invalid/path/{url_token}\n", code=1)
+    assert any(row["line"] == 1 and row["encoding"] == "base64" for row in url_findings)
+    short_segment = base64.b64encode(b"0123456789ab").decode()
+    many_segments = scan("stdin", data=" ".join([short_segment] * 4097), code=2)
+    assert not many_segments
+    oversized_plain = b"A" * (8 * 1024 * 1024 + 1)
+    oversized_segment = base64.b64encode(oversized_plain).decode()
+    partial_findings = scan(
+        "stdin", "--max-bytes", str(16 * 1024 * 1024),
+        data=f"{encoded_token}\n{oversized_segment}\n", code=2,
+    )
+    assert any(row["encoding"] == "base64" for row in partial_findings)
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
         custom_rules = root / "custom-rules.toml"
@@ -98,6 +117,34 @@ def main() -> None:
             data=f"INTERNAL_TOKEN={INTERNAL_TOKEN}\n", code=1,
         )
         assert any(row["detector"] == "org-internal-token" for row in custom_findings)
+
+        path_only_rules = root / "path-only-rules.toml"
+        path_only_rules.write_text(
+            "[[rules]]\nid = 'path-only-test'\ndescription = 'Path-only test rule'\n"
+            "path = 'path-only\\.env$'\n"
+        )
+        path_only_findings = scan(
+            "stdin", "--name", "path-only.env", "--rules", str(path_only_rules),
+            data=f"TOKEN={encoded_token}\n", code=1,
+        )
+        path_only = [row for row in path_only_findings if row["detector"] == "path-only-test"]
+        assert len(path_only) == 1 and path_only[0].get("encoding") is None
+
+        cross_rules = root / "cross-segment-rules.toml"
+        cross_rules.write_text(
+            "[[rules]]\nid = 'cross-segment-test'\n"
+            "regex = 'leftleftleft\\nrightrightrigh'\n"
+        )
+        first_segment = base64.b64encode(b"leftleftleft").decode()
+        second_segment = base64.b64encode(b"rightrightrigh").decode()
+        cross_run = subprocess.run(
+            [BIN, "stdin", "--rules", str(cross_rules)],
+            input=f"{first_segment} {second_segment}", text=True,
+            capture_output=True, env=ENV,
+        )
+        assert TOKEN not in cross_run.stdout + cross_run.stderr
+        assert cross_run.returncode == 2 and not cross_run.stdout
+        assert "decoded finding crosses segment boundary" in cross_run.stderr
 
         invalid_rules = root / "invalid-rules.toml"
         invalid_rules.write_text(
@@ -288,6 +335,29 @@ def main() -> None:
         git(range_repo, "add", "--", old_secret.name, key_path.name, nested_relative)
         git(range_repo, "commit", "-qm", "add key and harmless line")
         key_commit = git(range_repo, "rev-parse", "HEAD")
+        encoded_path = range_repo / "encoded.env"
+        encoded_value = base64.b64encode(f"GITHUB_TOKEN={TOKEN}".encode()).decode()
+        encoded_path.write_text(f"é TOKEN={encoded_value}\n")
+        git(range_repo, "add", "--", encoded_path.name)
+        git(range_repo, "commit", "-qm", "add encoded token")
+        encoded_commit = git(range_repo, "rev-parse", "HEAD")
+        encoded_range = ["git-range", str(range_repo), "--base", key_commit, "--head", encoded_commit]
+        encoded_run = subprocess.run([BIN, *encoded_range], text=True, capture_output=True, env=ENV)
+        assert encoded_run.returncode == 1, (encoded_run.returncode, encoded_run.stderr)
+        encoded_results = [json.loads(line) for line in encoded_run.stdout.splitlines()]
+        assert any(row["encoding"] == "base64" and row["line"] == 1 and row["column"] == 10
+                   for row in encoded_results)
+        encoded_sarif = subprocess.run(
+            [BIN, *encoded_range, "--format", "sarif"], text=True, capture_output=True, env=ENV,
+        )
+        assert encoded_sarif.returncode == 1, (encoded_sarif.returncode, encoded_sarif.stderr)
+        encoded_sarif_doc = json.loads(encoded_sarif.stdout)
+        encoded_result = next(
+            result for result in encoded_sarif_doc["runs"][0]["results"]
+            if result["properties"].get("encoding") == "base64"
+        )
+        encoded_region = encoded_result["locations"][0]["physicalLocation"]["region"]
+        assert encoded_region["startLine"] == 1 and encoded_region["startColumn"] == 9
         range_args = ["git-range", str(range_repo), "--base", base, "--head", key_commit]
         range_run = subprocess.run([BIN, *range_args], text=True, capture_output=True, env=ENV)
         assert TOKEN not in range_run.stdout + range_run.stderr
